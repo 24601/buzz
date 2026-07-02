@@ -560,7 +560,7 @@ mod tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 24);
+        assert_eq!(migrations.len(), 25);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -595,7 +595,6 @@ mod tests {
             .as_str()
             .contains("CREATE TABLE git_repo_names"));
         assert!(!migrations[0].sql.as_str().contains("git_repo_names"));
-
         // Same additive-migration rule for the per-community workspace icon
         // (NIP-11 `icon`): its own version, never folded into 0001.
         assert_eq!(migrations[2].version, 3);
@@ -879,6 +878,17 @@ mod tests {
             .to_lowercase()
             .contains("for update"));
         assert!(ttl_shared.contains("NEW.kind <> 9007"));
+
+        // Corporate identity bindings are additive and community-scoped.
+        assert_eq!(migrations[24].version, 25);
+        assert!(migrations[24]
+            .sql
+            .as_str()
+            .contains("CREATE TABLE identity_bindings"));
+        assert!(migrations[24]
+            .sql
+            .as_str()
+            .contains("idx_identity_bindings_active_uid"));
     }
 
     #[test]
@@ -1207,6 +1217,7 @@ mod tests {
             "communities",
             "events",
             "channels",
+            "identity_bindings",
             "scheduled_workflow_fires",
             "audit_log",
         ] {
