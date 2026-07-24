@@ -1004,8 +1004,16 @@ declare global {
       kind: number;
       tags: string[][];
     }>;
+    /** Project-scoped events accepted by the mock relay. */
+    __BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?: Array<{
+      content: string;
+      kind: number;
+      tags: string[][];
+    }>;
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
+    __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
     /** Structured merge error returned by the mock native merge command. */
     __BUZZ_E2E_PROJECT_MERGE_ERROR__?: {
       code: string;
@@ -5037,7 +5045,7 @@ function isMockProjectScopedEvent(event: RelayEvent): boolean {
     (tag) => tag[0] === "a" && (tag[1] ?? "").startsWith("30617:"),
   );
   return (
-    hasRepoAddressTag &&
+    (event.kind === KIND_REPO_ANNOUNCEMENT || hasRepoAddressTag) &&
     (event.kind === 1 || MOCK_PROJECT_KINDS.has(event.kind))
   );
 }
@@ -8912,6 +8920,30 @@ function sendToMockSocket(args: {
         return;
       }
       getMockProjectEventStore().push(event);
+      const acceptedProjectEvents =
+        window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ ?? [];
+      acceptedProjectEvents.push({
+        content: event.content,
+        kind: event.kind,
+        tags: event.tags,
+      });
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__ = acceptedProjectEvents;
+      const failedAckIndex =
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.indexOf(event.kind) ??
+        -1;
+      if (failedAckIndex >= 0) {
+        window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?.splice(
+          failedAckIndex,
+          1,
+        );
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "mock lost project acknowledgement",
+        ]);
+        return;
+      }
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }

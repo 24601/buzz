@@ -64,9 +64,7 @@ test("top-level project lists align dates and overflow actions", async ({
   ).toBeVisible();
   await page.keyboard.press("Escape");
   await page.getByTestId("projects-create-menu").hover();
-  await expect(
-    page.getByRole("menuitem", { name: "Repository" }),
-  ).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Project" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Issue" })).toBeVisible();
   await page
     .getByRole("menuitem", { name: "Pull Request", exact: true })
@@ -134,6 +132,146 @@ test("top-level project lists align dates and overflow actions", async ({
       (row) => row.scrollWidth <= row.clientWidth,
     ),
   ).toBe(true);
+});
+
+test("creating a project publishes its initial repository grouping", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("multi-repo-demo");
+  await page
+    .getByTestId("create-project-description")
+    .fill("A grouped project created through the desktop app.");
+  await page
+    .getByTestId("create-project-clone-url")
+    .fill("https://relay.example.com/git/owner/multi-repo-demo.git");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-multi-repo-demo"], [data-testid="project-row-multi-repo-demo"]',
+      )
+      .first(),
+  ).toBeVisible();
+
+  const createdEvents = await page.evaluate(
+    () =>
+      window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+        event.tags.some(
+          (tag) => tag[0] === "d" && tag[1] === "multi-repo-demo",
+        ),
+      ) ?? [],
+  );
+  expect(createdEvents.map((event) => event.kind).sort()).toEqual([
+    30617, 30621,
+  ]);
+  const projectEvent = createdEvents.find((event) => event.kind === 30621);
+  expect(projectEvent?.tags).toContainEqual([
+    "a",
+    `30617:${"deadbeef".repeat(8)}:multi-repo-demo`,
+    "",
+    "primary",
+  ]);
+
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("multi-repo-demo");
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(
+    page.getByText('You already have a project named "multi-repo-demo".'),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+            event.tags.some(
+              (tag) => tag[0] === "d" && tag[1] === "multi-repo-demo",
+            ),
+          ).length ?? 0,
+      ),
+    )
+    .toBe(2);
+});
+
+test("project creation can retry after its repository publication fails", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__ = [30621];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("retry-project");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(page.getByText("mock project event rejection")).toBeVisible();
+
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-retry-project"], [data-testid="project-row-retry-project"]',
+      )
+      .first(),
+  ).toBeVisible();
+});
+
+test("project creation is idempotent after a lost publish acknowledgement", async ({
+  page,
+}) => {
+  await enableProjectsFeature(page);
+  await page.addInitScript(() => {
+    window.__BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__ = [30621];
+  });
+  await installMockBridge(page);
+  await page.goto("/", { waitUntil: "domcontentloaded" });
+  await page.getByTestId("open-projects-view").click();
+  await page.getByTestId("projects-create-menu").hover();
+  await page.getByRole("menuitem", { name: "Project" }).click();
+  await page.getByTestId("create-project-name").fill("lost-ack-project");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(page.getByTestId("create-project-dialog")).toBeVisible();
+  await expect(
+    page.getByText("mock lost project acknowledgement"),
+  ).toBeVisible();
+
+  await page.getByTestId("create-project-submit").click();
+  await expect(page.getByTestId("create-project-dialog")).toBeHidden();
+  await expect(
+    page
+      .locator(
+        '[data-testid="project-card-lost-ack-project"], [data-testid="project-row-lost-ack-project"]',
+      )
+      .first(),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.__BUZZ_E2E_ACCEPTED_PROJECT_EVENTS__?.filter((event) =>
+            event.tags.some(
+              (tag) => tag[0] === "d" && tag[1] === "lost-ack-project",
+            ),
+          ).length ?? 0,
+      ),
+    )
+    .toBe(2);
 });
 
 test("multi-repository projects switch the active repository", async ({

@@ -22,7 +22,7 @@ type CreateProjectDialogProps = {
   open: boolean;
 };
 
-/** Modal for publishing a new project (NIP-34 repo announcement). */
+/** Modal for publishing a project with its initial NIP-34 repository. */
 export function CreateProjectDialog({
   isCreating,
   onCreate,
@@ -88,7 +88,7 @@ export function CreateProjectDialog({
         className="max-w-lg"
         contentClassName="pt-3"
         data-testid="create-project-dialog"
-        description="Projects are repositories published to this workspace's relay."
+        description="Projects group one or more repositories published to this workspace's relay."
         footer={
           <div className="flex w-full items-center justify-end gap-3">
             <Button
@@ -181,7 +181,7 @@ export function CreateProjectDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="create-project-clone-url"
             >
-              Clone URL
+              Initial repository clone URL
               <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
             </label>
             <div
@@ -217,7 +217,7 @@ export function CreateProjectDialog({
               className="text-sm font-medium text-foreground"
               htmlFor="create-project-web-url"
             >
-              Web URL
+              Initial repository web URL
               <span className={CREATE_LABEL_OPTIONAL_CLASS}>Optional</span>
             </label>
             <div

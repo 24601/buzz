@@ -575,8 +575,8 @@ export function ProjectsView() {
   const createMenu = (
     <ProjectsCreateMenu
       onCreateIssue={() => setCreateIssueOpen(true)}
+      onCreateProject={() => setCreateProjectOpen(true)}
       onCreatePullRequest={() => setCreatePullRequestOpen(true)}
-      onCreateRepository={() => setCreateProjectOpen(true)}
     />
   );
 
