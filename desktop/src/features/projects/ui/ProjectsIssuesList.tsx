@@ -6,6 +6,7 @@ import type {
   ProjectIssueListItem,
   Repository,
 } from "@/features/projects/hooks";
+import { relativeTime } from "@/features/projects/lib/projectsViewHelpers";
 import type { ProjectWorkItemSection } from "@/features/projects/projectWorkItems";
 import {
   resolveUserLabel,
@@ -45,25 +46,6 @@ type ProjectsIssuesListProps = {
   viewMode: "grid" | "list";
 };
 
-function formatRelativeTime(createdAt: number) {
-  const elapsedSeconds = Math.max(
-    1,
-    Math.floor(Date.now() / 1_000 - createdAt),
-  );
-  const units = [
-    { label: "year", seconds: 365 * 24 * 60 * 60 },
-    { label: "month", seconds: 30 * 24 * 60 * 60 },
-    { label: "day", seconds: 24 * 60 * 60 },
-    { label: "hour", seconds: 60 * 60 },
-    { label: "minute", seconds: 60 },
-  ];
-  const unit =
-    units.find((item) => elapsedSeconds >= item.seconds) ??
-    units[units.length - 1];
-  const value = Math.max(1, Math.floor(elapsedSeconds / unit.seconds));
-  return `${value} ${unit.label}${value === 1 ? "" : "s"} ago`;
-}
-
 function nextStepLabel(status: ProjectIssue["status"]) {
   if (status === "Done" || status === "Closed") return "View issue";
   if (status === "In Review") return "Review issue";
@@ -91,10 +73,8 @@ function IssueHeader({
       </div>
       <p className={`truncate ${PROJECT_LIST_ROW_SUBTEXT_CLASS}`}>
         {project.name}
-        {includeDate
-          ? ` · created ${formatRelativeTime(issue.createdAt)}`
-          : null}{" "}
-        · by{" "}
+        {includeDate ? ` · created ${relativeTime(issue.createdAt)}` : null} ·
+        by{" "}
         <UserProfilePopover pubkey={issue.author} triggerElement="span">
           <button
             className="relative z-10 rounded-sm hover:underline focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
@@ -224,7 +204,7 @@ function IssueListRow({
             data-testid="projects-row-date"
             title={new Date(issue.createdAt * 1_000).toLocaleString()}
           >
-            {formatRelativeTime(issue.createdAt)}
+            {relativeTime(issue.createdAt)}
           </span>
           <ProjectListRowMenu label={`More options for ${issue.title}`}>
             <DropdownMenuItem onSelect={() => onOpen(project, issue)}>
