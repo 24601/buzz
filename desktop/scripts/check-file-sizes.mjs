@@ -362,10 +362,7 @@ const overrides = new Map([
   ["src/features/profile/ui/UserProfilePanelSections.tsx", 1140],
   // +14 for openEditAgent event subscription (config-nudge card "Open Edit Agent" action).
   // +11 for editAgentFocus state + initialFocus prop threading (deep-link granularity).
-  // +1 for A13 fail-closed canViewUsage wiring + AgentUsageFocusedView mount.
-  // +14 for query-derived usageIngressTrailing summary threaded into the
-  // Info-tab ingress row (replaces the hardcoded "View" label, plan:328).
-  ["src/features/profile/ui/UserProfilePanel.tsx", 1040],
+  ["src/features/profile/ui/UserProfilePanel.tsx", 1025],
   // PersistBackend enum + marker-on-keyring-success plumbing and its three
   // fail-closed regression tests (silent identity rotation on keyring outage).
   // A small overage from load-bearing security plumbing on a file already at
