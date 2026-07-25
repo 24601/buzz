@@ -80,3 +80,17 @@ test("ready onboarding runtimes exclude hidden ready harnesses", () => {
     ["claude"],
   );
 });
+
+test("ready onboarding runtimes exclude device-disabled harnesses", () => {
+  const runtimes = [
+    runtime("codex", "available", "logged_in"),
+    runtime("claude", "available", "logged_in"),
+  ];
+
+  assert.deepEqual(
+    getReadyOnboardingRuntimes(runtimes, ["claude", "codex"]).map(
+      ({ id }) => id,
+    ),
+    [],
+  );
+});
