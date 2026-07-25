@@ -130,6 +130,21 @@ describe("handleDeleteCustomHarness", () => {
       "delete of non-existent id must not throw",
     );
   });
+
+  it("throws when deleteCustomHarnessError knob is set", () => {
+    handleSaveCustomHarness(makeArgs({ id: "keep-alive" }));
+    const config = { mock: { deleteCustomHarnessError: "permission denied" } };
+    assert.throws(
+      () => handleDeleteCustomHarness({ id: "keep-alive" }, config),
+      /permission denied/,
+      "must throw the injected error message",
+    );
+    // Entry must remain in store — the error means delete did not complete.
+    assert.ok(
+      mockCustomHarnesses.has("keep-alive"),
+      "entry must remain when delete throws",
+    );
+  });
 });
 
 // ── discover integration: store is shared by reference ───────────────────────

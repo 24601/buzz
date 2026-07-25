@@ -180,6 +180,8 @@ type E2eConfig = {
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
     acpAuthMethodsError?: string;
+    /** When set, the `delete_custom_harness` mock command throws with this message. */
+    deleteCustomHarnessError?: string;
     connectAcpRuntimeResult?: RawConnectAcpRuntimeResult;
     connectAcpRuntimeDelayMs?: number;
     connectAcpRuntimeError?: string;
@@ -10023,6 +10025,7 @@ export function maybeInstallE2eTauriMocks() {
       case "delete_custom_harness":
         return handleDeleteCustomHarness(
           payload as Parameters<typeof handleDeleteCustomHarness>[0],
+          activeConfig,
         );
       case "discover_acp_auth_methods":
         return handleDiscoverAcpAuthMethods(

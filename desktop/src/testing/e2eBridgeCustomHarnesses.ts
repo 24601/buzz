@@ -73,8 +73,17 @@ export function handleSaveCustomHarness(args: {
 /**
  * Handle `delete_custom_harness`.
  * Removes the harness from the in-memory store. Idempotent (not-found is OK).
+ * When `config?.mock?.deleteCustomHarnessError` is set, throws with that message
+ * to exercise the UI's inline error path.
  */
-export function handleDeleteCustomHarness(args: { id?: string }): void {
+export function handleDeleteCustomHarness(
+  args: { id?: string },
+  config?: { mock?: { deleteCustomHarnessError?: string } } | undefined,
+): void {
+  const errorMsg = config?.mock?.deleteCustomHarnessError;
+  if (errorMsg) {
+    throw new Error(errorMsg);
+  }
   const id = args.id ?? "";
   mockCustomHarnesses.delete(id);
 }
