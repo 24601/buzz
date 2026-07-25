@@ -25,8 +25,13 @@ import 'package:buzz/features/profile/user_cache_provider.dart';
 import 'package:buzz/features/profile/user_profile.dart';
 import 'package:buzz/shared/relay/relay.dart';
 import 'package:buzz/shared/theme/theme.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 const _channelId = 'test-channel';
+
+/// Shared mock prefs for providers that read [savedPrefsProvider]
+/// (e.g. the compose bar's draft store). Initialized in [main].
+late SharedPreferences _testPrefs;
 
 final _testChannel = Channel(
   id: _channelId,
@@ -186,6 +191,8 @@ Widget _buildTestable({
       relayClientProvider.overrideWithValue(
         RelayClient(baseUrl: 'http://localhost:3000'),
       ),
+      // Compose bar drafts persist through SharedPreferences.
+      savedPrefsProvider.overrideWithValue(_testPrefs),
     ],
     child: MaterialApp(
       theme: AppTheme.light(),
@@ -222,6 +229,11 @@ double? effectiveFontSizeForText(
 }
 
 void main() {
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    _testPrefs = await SharedPreferences.getInstance();
+  });
+
   group('ChannelDetailPage', () {
     testWidgets('defers read-state mark until after build', (tester) async {
       final readState = _SynchronousReadStateNotifier(
@@ -1347,6 +1359,7 @@ void main() {
             relayClientProvider.overrideWithValue(
               RelayClient(baseUrl: 'http://localhost:3000'),
             ),
+            savedPrefsProvider.overrideWithValue(_testPrefs),
           ],
           child: MaterialApp(
             theme: AppTheme.light(),
