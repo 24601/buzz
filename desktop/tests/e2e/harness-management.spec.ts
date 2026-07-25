@@ -197,7 +197,10 @@ test.describe("add custom harness", () => {
     });
 
     // Submit.
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByTestId("custom-harness-form")
+      .getByRole("button", { name: "Save", exact: true })
+      .click();
 
     // Row must appear in the list after save.
     await expect(
@@ -247,7 +250,10 @@ test.describe("add custom harness", () => {
     await page.getByTestId("custom-harness-edit-my-custom-agent").click();
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
     await page.fill("#ch-label", "V2 Label");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByTestId("custom-harness-form")
+      .getByRole("button", { name: "Save", exact: true })
+      .click();
 
     // Exactly one row with the same ID; label updated.
     const rows = page.locator(
@@ -271,7 +277,10 @@ test.describe("add custom harness", () => {
     await expect(page.getByTestId("custom-harness-form")).toBeVisible();
     await page.fill("#ch-label", "New Harness");
     await page.fill("#ch-id", "new-harness");
-    await page.getByRole("button", { name: "Save" }).click();
+    await page
+      .getByTestId("custom-harness-form")
+      .getByRole("button", { name: "Save", exact: true })
+      .click();
 
     // Old row gone; new row present.
     await expect(
@@ -380,6 +389,32 @@ test("onboarding setup More-harnesses click navigates to Settings → Agents", a
   await installMockBridge(page, undefined, {
     skipCommunitySeed: true,
     skipOnboardingSeed: true,
+  });
+  // Seed a community stamped with a *foreign* pubkey. This is the only shape
+  // that satisfies both preconditions of this test at once:
+  //   - machine onboarding must still run, so the community must NOT vouch for
+  //     the active identity (migrateMachineOnboardingCompletion only accepts a
+  //     community whose recorded pubkey matches — see machineOnboarding.ts:70).
+  //   - after onboarding completes, useCommunityInit must NOT report
+  //     needsSetup, or App.tsx:499 renders WelcomeSetup instead of the router
+  //     and the navigation lands on a screen that has no settings tree.
+  // The default seed vouches (it uses the active pubkey) and skipping it
+  // entirely leaves zero communities, so neither default gets there.
+  await page.addInitScript(() => {
+    const communityId = "e2e-default-community";
+    window.localStorage.setItem(
+      "buzz-communities",
+      JSON.stringify([
+        {
+          id: communityId,
+          name: "E2E Test",
+          relayUrl: "ws://127.0.0.1:7777",
+          pubkey: "f".repeat(64),
+          addedAt: new Date().toISOString(),
+        },
+      ]),
+    );
+    window.localStorage.setItem("buzz-active-community-id", communityId);
   });
   await page.goto("/");
 

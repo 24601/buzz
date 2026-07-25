@@ -10,9 +10,43 @@ import type { RawAcpRuntimeCatalogEntry } from "../shared/api/tauri.ts";
 /** In-memory store for custom harnesses saved via `save_custom_harness`. */
 export const mockCustomHarnesses = new Map<string, RawAcpRuntimeCatalogEntry>();
 
+/**
+ * Ids removed via `delete_custom_harness` (or vacated by a rename).
+ *
+ * Needed because a test's `acpRuntimesCatalog` seed is static config, not the
+ * mutation store: deleting a seeded row leaves nothing to remove from
+ * `mockCustomHarnesses`, so without a tombstone the row would survive the
+ * delete and the mock would report success while the UI still shows it.
+ */
+export const mockDeletedCustomHarnesses = new Set<string>();
+
 /** Reset the store between tests. */
 export function resetMockCustomHarnesses(): void {
   mockCustomHarnesses.clear();
+  mockDeletedCustomHarnesses.clear();
+}
+
+/**
+ * Overlay the mutation store onto a seeded catalog.
+ *
+ * Deleted ids drop out, saved ids replace their seeded entry in place (so a
+ * same-id edit updates rather than duplicates), and newly added ids append.
+ */
+export function mergeMockCustomHarnesses(
+  base: RawAcpRuntimeCatalogEntry[],
+): RawAcpRuntimeCatalogEntry[] {
+  const merged = base.filter(
+    (entry) => !mockDeletedCustomHarnesses.has(entry.id),
+  );
+  for (const entry of mockCustomHarnesses.values()) {
+    const index = merged.findIndex((existing) => existing.id === entry.id);
+    if (index === -1) {
+      merged.push(entry);
+    } else {
+      merged[index] = entry;
+    }
+  }
+  return merged;
 }
 
 /**
@@ -41,7 +75,10 @@ export function handleSaveCustomHarness(args: {
   // On rename: remove the old entry so the old id is no longer in the catalog.
   if (originalId && originalId !== id) {
     mockCustomHarnesses.delete(originalId);
+    mockDeletedCustomHarnesses.add(originalId);
   }
+  // A save resurrects an id that an earlier test step deleted.
+  mockDeletedCustomHarnesses.delete(id);
 
   const entry: RawAcpRuntimeCatalogEntry = {
     id,
@@ -86,4 +123,5 @@ export function handleDeleteCustomHarness(
   }
   const id = args.id ?? "";
   mockCustomHarnesses.delete(id);
+  mockDeletedCustomHarnesses.add(id);
 }

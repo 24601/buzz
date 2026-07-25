@@ -4,7 +4,7 @@ import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 import {
-  mockCustomHarnesses,
+  mergeMockCustomHarnesses,
   handleSaveCustomHarness,
   handleDeleteCustomHarness,
 } from "./e2eBridgeCustomHarnesses.ts";
@@ -6964,7 +6964,9 @@ async function handleDiscoverAcpRuntimes(
   }
   const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
-    return configured.map(withMockRuntimeConfigMetadata);
+    return mergeMockCustomHarnesses(
+      configured.map(withMockRuntimeConfigMetadata),
+    );
   }
   const defaultCatalog: RawAcpRuntimeCatalogEntry[] = [
     {
@@ -7046,10 +7048,9 @@ async function handleDiscoverAcpRuntimes(
       login_hint: undefined,
     },
   ];
-  return [
-    ...defaultCatalog.map(withMockRuntimeConfigMetadata),
-    ...Array.from(mockCustomHarnesses.values()),
-  ];
+  return mergeMockCustomHarnesses(
+    defaultCatalog.map(withMockRuntimeConfigMetadata),
+  );
 }
 
 async function handleDiscoverAcpAuthMethods(

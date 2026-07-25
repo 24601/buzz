@@ -19,6 +19,7 @@ import { beforeEach, describe, it } from "node:test";
 
 import {
   mockCustomHarnesses,
+  mergeMockCustomHarnesses,
   resetMockCustomHarnesses,
   handleSaveCustomHarness,
   handleDeleteCustomHarness,
@@ -149,11 +150,86 @@ describe("handleDeleteCustomHarness", () => {
 
 // ── discover integration: store is shared by reference ───────────────────────
 
+describe("mergeMockCustomHarnesses", () => {
+  const seeded = (id, label = id) => ({ id, label, source: "custom" });
+
+  it("appends a newly saved harness that is not in the seeded catalog", () => {
+    handleSaveCustomHarness(makeArgs({ id: "added", label: "Added" }));
+    const merged = mergeMockCustomHarnesses([seeded("preset-a")]);
+    assert.deepEqual(
+      merged.map((e) => e.id),
+      ["preset-a", "added"],
+    );
+  });
+
+  it("replaces a seeded entry in place on same-id save — no duplicate row", () => {
+    handleSaveCustomHarness(makeArgs({ id: "seeded-one", label: "V2" }));
+    const merged = mergeMockCustomHarnesses([
+      seeded("preset-a"),
+      seeded("seeded-one", "V1"),
+    ]);
+    assert.deepEqual(
+      merged.map((e) => e.id),
+      ["preset-a", "seeded-one"],
+      "must not duplicate the id",
+    );
+    assert.equal(
+      merged.find((e) => e.id === "seeded-one").label,
+      "V2",
+      "saved entry must win over the seed",
+    );
+  });
+
+  it("drops a deleted seeded entry (tombstone, not just store removal)", () => {
+    // The regression: a seeded row has no store entry to delete, so without a
+    // tombstone the row survived the delete and the spec failed.
+    handleDeleteCustomHarness({ id: "seeded-one" });
+    const merged = mergeMockCustomHarnesses([
+      seeded("preset-a"),
+      seeded("seeded-one"),
+    ]);
+    assert.deepEqual(
+      merged.map((e) => e.id),
+      ["preset-a"],
+    );
+  });
+
+  it("drops the vacated old id after a rename and surfaces the new one", () => {
+    handleSaveCustomHarness(
+      makeArgs({ id: "new-id", label: "New", originalId: "old-id" }),
+    );
+    const merged = mergeMockCustomHarnesses([seeded("old-id", "Old")]);
+    assert.deepEqual(
+      merged.map((e) => e.id),
+      ["new-id"],
+    );
+  });
+
+  it("re-saving a deleted id resurrects it", () => {
+    handleDeleteCustomHarness({ id: "seeded-one" });
+    handleSaveCustomHarness(makeArgs({ id: "seeded-one", label: "Back" }));
+    const merged = mergeMockCustomHarnesses([seeded("seeded-one", "Original")]);
+    assert.deepEqual(
+      merged.map((e) => e.id),
+      ["seeded-one"],
+    );
+    assert.equal(merged[0].label, "Back");
+  });
+
+  it("leaves a seeded catalog untouched when nothing has been mutated", () => {
+    const base = [seeded("preset-a"), seeded("preset-b")];
+    assert.deepEqual(
+      mergeMockCustomHarnesses(base).map((e) => e.id),
+      ["preset-a", "preset-b"],
+    );
+  });
+});
+
 describe("mockCustomHarnesses Map reference", () => {
   it("handler writes are immediately visible to callers that read the exported Map", () => {
-    // e2eBridge.ts reads `Array.from(mockCustomHarnesses.values())` in
-    // handleDiscoverAcpRuntimes.  The exported Map is the same object by reference,
-    // so writes via the handler are visible to any reader of the Map.
+    // handleDiscoverAcpRuntimes merges this store into the catalog it returns.
+    // The exported Map is the same object by reference, so writes via the
+    // handler are visible to any reader of the Map.
     assert.equal(
       mockCustomHarnesses.size,
       0,
