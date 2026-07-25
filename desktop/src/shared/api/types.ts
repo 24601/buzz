@@ -190,6 +190,7 @@ export type UserStatusLookup = Record<string, UserStatus | null>;
 export type {
   ProjectLocalRepository,
   ProjectLocalRepoSnapshot,
+  ProjectRepoBranchResult,
   ProjectRepoCommit,
   ProjectRepoContributor,
   ProjectRepoCloneResult,
@@ -311,6 +312,27 @@ export type RelayAgent = {
   status: "online" | "away" | "offline";
   respondTo: RespondToMode | null;
   respondToAllowlist: string[];
+};
+
+export type ManagedAgentRuntimeLifecycle =
+  | "starting"
+  | "listening"
+  | "waking"
+  | "ready"
+  | "failed"
+  | "stopped";
+
+export type ManagedAgentRuntimeStatus = {
+  pubkey: string;
+  /** Exact submitted descriptor, present only on startup reconcile results. */
+  requestedRelayUrl?: string;
+  /** Canonical, backend-owned pair identity component. Do not normalize in TS. */
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle: ManagedAgentRuntimeLifecycle;
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
 };
 
 export type ManagedAgentBackend =
@@ -526,6 +548,8 @@ export type AcpRuntimeCatalogEntry = {
   installHint: string;
   installInstructionsUrl: string;
   canAutoInstall: boolean;
+  /** True when the runtime depends on a separately installed vendor CLI. */
+  requiresExternalCli: boolean;
   underlyingCliPath: string | null;
   /** True when an npm adapter step is pending but Node.js / npm is absent. */
   nodeRequired: boolean;

@@ -6,7 +6,7 @@ import { parse as yamlParse } from "yaml";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
-import type { RelayEvent } from "@/shared/api/types";
+import type { ChannelTemplate, RelayEvent } from "@/shared/api/types";
 import { getMarkdownParseCount } from "@/shared/ui/markdown/nodeCache";
 import { syncAgentTurnsFromEvents } from "@/features/agents/activeAgentTurnsStore";
 import { recordTimeoutFromRejection } from "@/features/moderation/lib/timeoutStore";
@@ -36,6 +36,7 @@ import {
   KIND_MEMBER_ADDED_NOTIFICATION,
   KIND_MEMBER_REMOVED_NOTIFICATION,
   KIND_REPO_ANNOUNCEMENT,
+  KIND_REPO_STATE,
   KIND_STREAM_MESSAGE_EDIT,
   KIND_SYSTEM_MESSAGE,
   KIND_TEXT_NOTE,
@@ -48,6 +49,7 @@ import type {
 import type {
   RawAcpRuntimeCatalogEntry,
   RawInstallRuntimeResult,
+  RuntimeFileConfigSubset,
 } from "@/shared/api/tauri";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -78,6 +80,12 @@ type MockManagedAgentSeed = {
   autoRestartOnConfigChange?: boolean;
   respondTo?: RawManagedAgent["respond_to"];
   respondToAllowlist?: string[];
+};
+
+type MockManagedAgentRuntimeSeed = {
+  pubkey: string;
+  relayUrl: string;
+  lifecycle?: MockManagedAgentRuntimeRow["lifecycle"];
 };
 
 type MockRelayAgentSeed = {
@@ -198,6 +206,8 @@ const DEFAULT_MOCK_AGENT_USAGE_SERIES: RawAgentUsageSeries = {
 type E2eConfig = {
   mode?: "mock" | "relay";
   mock?: {
+    /** Advertised HEAD for the first mock project without adding that branch. */
+    projectHeadBranch?: string;
     /** Builderlab account returned by hosted-community onboarding. Null/omitted = signed out. */
     builderlabAuth?: {
       email?: string;
@@ -227,6 +237,12 @@ type E2eConfig = {
       archived_at?: string | null;
     };
     acpRuntimesCatalog?: RawAcpRuntimeCatalogEntry[];
+    /** Catalog returned after a successful mocked install. */
+    acpRuntimesCatalogAfterInstall?: RawAcpRuntimeCatalogEntry[];
+    /** Catalog responses after install for testing later sign-in completion. */
+    acpRuntimesCatalogAfterInstallSequence?: RawAcpRuntimeCatalogEntry[][];
+    /** Catalog responses for successive discovery calls. The final response repeats. */
+    acpRuntimesCatalogSequence?: RawAcpRuntimeCatalogEntry[][];
     acpRuntimesDelayMs?: number;
     acpAuthMethods?: Record<string, RawAcpAuthMethodsResult>;
     acpAuthMethodsErrors?: Record<string, string>;
@@ -241,11 +257,26 @@ type E2eConfig = {
      *  Call N returns results[N]; when exhausted the last entry repeats.
      *  Takes precedence over `installAcpRuntimeResult`. */
     installAcpRuntimeResults?: RawInstallRuntimeResult[];
+    /** Per-runtime install configuration keyed by runtimeId.
+     *  When a runtimeId matches, its entry overrides the global
+     *  installAcpRuntime* fields for that specific runtime. */
+    installAcpRuntimeByRuntime?: Record<
+      string,
+      {
+        delayMs?: number;
+        result?: RawInstallRuntimeResult;
+        /** Call-order sequence — same semantics as installAcpRuntimeResults. */
+        results?: RawInstallRuntimeResult[];
+      }
+    >;
     managedAgentPrereqs?: {
       acp?: MockCommandAvailability;
       mcp?: MockCommandAvailability;
     };
     managedAgents?: MockManagedAgentSeed[];
+    /** Per agent+relay runtime rows for the pair-scoped lifecycle commands
+     *  (`list/start/stop/restart_managed_agent_runtime`). */
+    managedAgentRuntimes?: MockManagedAgentRuntimeSeed[];
     personas?: MockPersonaSeed[];
     teams?: MockTeamSeed[];
     relayAgents?: MockRelayAgentSeed[];
@@ -256,7 +287,10 @@ type E2eConfig = {
     addChannelMembersErrors?: (string | null)[];
     channelMembersReadDelayMs?: number;
     createManagedAgentDelayMs?: number;
+    channelTemplates?: ChannelTemplate[];
     channelsReadError?: string;
+    /** Reject successive mock `get_channels` calls, then resume. */
+    channelsReadErrors?: (string | null)[];
     /** Reject successive mock `create_channel` calls, then resume. */
     createChannelErrors?: string[];
     /** Reject successive mock `ensure_starter_channels` calls, then resume. */
@@ -304,6 +338,8 @@ type E2eConfig = {
     openerError?: string;
     /** Delay binding signatures so specs can exercise request supersession. */
     nostrBindSignDelayMs?: number;
+    /** Reject successive mock WebSocket connect attempts, then resume. */
+    websocketConnectErrors?: string[];
     stallWebsocketSends?: boolean;
     userSearchDelayMs?: number;
     // NIP-IA gate inputs — see tests/helpers/bridge.ts:MockBridgeOptions for
@@ -422,6 +458,8 @@ type E2eConfig = {
       model: string | null;
       preferred_runtime?: string | null;
     };
+    /** File-layer config returned by runtime id. */
+    runtimeFileConfigs?: Record<string, RuntimeFileConfigSubset | null>;
     /** Baked build env returned by the display and key-name Tauri commands. */
     bakedBuildEnv?: Array<{
       key: string;
@@ -464,9 +502,29 @@ type E2eConfig = {
      * spec can interleave edits and exercise the mid-save race handling.
      */
     globalConfigSaveDelayMs?: number;
+    /**
+     * Override the `discover_agent_models` mock response. When set, returns
+     * this catalog instead of the default per-harness model list.
+     */
+    discoverAgentModels?: {
+      models: Array<{
+        id: string;
+        name: string | null;
+        description?: string | null;
+      }>;
+      supportsSwitching: boolean;
+      agentDefaultModel?: string | null;
+      selectedModel?: string | null;
+    };
+    /**
+     * When set, `discover_agent_models` throws with this message instead of
+     * returning a catalog.
+     */
+    discoverAgentModelsError?: string;
   };
   relayHttpUrl?: string;
   relayWsUrl?: string;
+  autoConnectDefaultRelay?: boolean;
   identity?: TestIdentity;
 };
 
@@ -844,6 +902,24 @@ type MockManagedAgent = RawManagedAgent & {
   log_lines: string[];
 };
 
+// Mirrors the Rust `ManagedAgentRuntimeStatus` camelCase wire shape for the
+// pair-scoped lifecycle commands.
+type MockManagedAgentRuntimeRow = {
+  pubkey: string;
+  relayUrl: string;
+  localSetup: boolean;
+  lifecycle:
+    | "starting"
+    | "listening"
+    | "waking"
+    | "ready"
+    | "failed"
+    | "stopped";
+  pid: number | null;
+  error: string | null;
+  logPath: string | null;
+};
+
 type WsHandler = (message: unknown) => void;
 const GLOBAL_MOCK_SUBSCRIPTION = "*";
 
@@ -1050,6 +1126,7 @@ declare global {
     __BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__?: {
       local_path: string | null;
       local_branch: string | null;
+      local_branches: string[];
       local_head: string | null;
       local_short_head: string | null;
       remote_branch: string | null;
@@ -1069,10 +1146,31 @@ declare global {
     __BUZZ_E2E_GET_RELAY_CONNECTION_STATE__?: () => ConnectionState;
     __BUZZ_E2E_SET_STALL_WEBSOCKET_SENDS__?: (stall: boolean) => void;
     __BUZZ_E2E_DISCONNECT_MOCK_WEBSOCKETS__?: () => number;
+    __BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__?: () => number;
     __BUZZ_E2E_SET_MESH__?: (mesh: {
       admitted?: boolean;
       models?: Array<{ id: string; name: string | null }>;
       denyReason?: string;
+      /** Seed the runtime slot's lifecycle state (default "off"). */
+      nodeState?: "off" | "running";
+      /**
+       * Seed the runtime slot's role. "client" models this machine CONSUMING a
+       * peer's compute — it shares the single slot and reports state:"running",
+       * so the Share toggle must stay off. Drives the toggle-on regression test.
+       */
+      nodeMode?: "serve" | "client" | null;
+      /** Seed host-side serving usage to exercise the "who's using my compute" indicator. */
+      servingUsage?: Partial<{
+        inflight: number;
+        peakInflight: number;
+        requestsServed: number;
+        tokensServed: number;
+        tokensPerSecond: number;
+        localAttempts: number;
+        remoteAttempts: number;
+        endpointAttempts: number;
+        peers: number;
+      }>;
     }) => void;
     __BUZZ_E2E_SEED_ACTIVE_TURNS__?: (input: {
       agentPubkey: string;
@@ -2046,6 +2144,17 @@ function resetMockRelayAgents(config?: E2eConfig) {
 
 function resetMockManagedAgents(config?: E2eConfig) {
   mockManagedAgents = [];
+  mockManagedAgentRuntimes = (config?.mock?.managedAgentRuntimes ?? []).map(
+    (seed) => ({
+      pubkey: seed.pubkey,
+      relayUrl: seed.relayUrl,
+      localSetup: true,
+      lifecycle: seed.lifecycle ?? "ready",
+      pid: seed.lifecycle === "stopped" ? null : 43000,
+      error: null,
+      logPath: null,
+    }),
+  );
 
   for (const seed of config?.mock?.managedAgents ?? []) {
     mockManagedAgents.push(buildSeededManagedAgent(seed));
@@ -2742,6 +2851,7 @@ let mockWebsocketSendMutexWedged = false;
 let mockClosedChannelLiveSubscription = false;
 const realSockets = new Map<number, WebSocket>();
 let mockManagedAgents: MockManagedAgent[] = [];
+let mockManagedAgentRuntimes: MockManagedAgentRuntimeRow[] = [];
 
 // Mutable `save_subscriptions` table mirror — TEST-ONLY.
 //
@@ -2774,12 +2884,37 @@ function resetMockSaveSubscriptions(config: E2eConfig | undefined) {
 // in a browser. They deliberately do NOT model real admission, real inference,
 // or real mesh routing — those are proven by the Rust layer-2 tests and the
 // on-hardware layer-1 example. Do not port any of this into production code.
+type MockServingUsage = {
+  inflight: number;
+  peakInflight: number;
+  requestsServed: number;
+  tokensServed: number;
+  tokensPerSecond: number;
+  localAttempts: number;
+  remoteAttempts: number;
+  endpointAttempts: number;
+  peers: number;
+};
+
+const ZERO_SERVING_USAGE: MockServingUsage = {
+  inflight: 0,
+  peakInflight: 0,
+  requestsServed: 0,
+  tokensServed: 0,
+  tokensPerSecond: 0,
+  localAttempts: 0,
+  remoteAttempts: 0,
+  endpointAttempts: 0,
+  peers: 0,
+};
+
 const mockMeshState: {
   admitted: boolean;
   models: Array<{ id: string; name: string | null }>;
   denyReason: string;
   nodeState: "off" | "running";
   nodeMode: "serve" | "client" | null;
+  servingUsage: MockServingUsage;
 } = {
   admitted: true,
   models: [
@@ -2788,6 +2923,7 @@ const mockMeshState: {
   denyReason: "not a relay member",
   nodeState: "off",
   nodeMode: null,
+  servingUsage: { ...ZERO_SERVING_USAGE },
 };
 
 function resetMockMesh() {
@@ -2798,6 +2934,7 @@ function resetMockMesh() {
   mockMeshState.denyReason = "not a relay member";
   mockMeshState.nodeState = "off";
   mockMeshState.nodeMode = null;
+  mockMeshState.servingUsage = { ...ZERO_SERVING_USAGE };
 }
 let mockPersonas: RawPersona[] = [];
 let mockTeams: RawTeam[] = [];
@@ -3345,9 +3482,10 @@ function sendWsText(handler: WsHandler, payload: unknown[]) {
   });
 }
 
-function sendWsClose(handler: WsHandler) {
+function sendWsClose(handler: WsHandler, code?: number, reason?: string) {
   handler({
     type: "Close",
+    data: code === undefined ? undefined : { code, reason: reason ?? "" },
   });
 }
 
@@ -4810,6 +4948,7 @@ const MOCK_PROJECT_SUBJECTS = [
 
 const MOCK_PROJECT_KINDS = new Set<number>([
   KIND_REPO_ANNOUNCEMENT,
+  KIND_REPO_STATE,
   KIND_GIT_PATCH,
   KIND_GIT_PULL_REQUEST,
   KIND_GIT_PR_UPDATE,
@@ -4832,6 +4971,36 @@ function mulberry32(seed: number) {
 }
 
 let mockProjectEventStore: RelayEvent[] | null = null;
+const MOCK_PROJECT_BRANCHES_KEY = "buzz-e2e-project-branches";
+
+function readMockProjectBranches(): Record<string, Record<string, string>> {
+  try {
+    return JSON.parse(
+      window.sessionStorage.getItem(MOCK_PROJECT_BRANCHES_KEY) ?? "{}",
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeMockProjectBranch(
+  dtag: string,
+  branch: string,
+  commit: string | null,
+) {
+  const projects = readMockProjectBranches();
+  const branches = { ...(projects[dtag] ?? {}) };
+  if (commit) {
+    branches[branch] = commit;
+  } else {
+    delete branches[branch];
+  }
+  projects[dtag] = branches;
+  window.sessionStorage.setItem(
+    MOCK_PROJECT_BRANCHES_KEY,
+    JSON.stringify(projects),
+  );
+}
 
 function buildMockProjectEvents(): RelayEvent[] {
   const events: RelayEvent[] = [];
@@ -4864,6 +5033,31 @@ function buildMockProjectEvents(): RelayEvent[] {
         `mock-project-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
       ),
     );
+    events.push(
+      createMockEvent(
+        KIND_REPO_STATE,
+        "",
+        [
+          ["d", seed.dtag],
+          [
+            "HEAD",
+            `ref: refs/heads/${
+              projectIndex === 0
+                ? (getConfig()?.mock?.projectHeadBranch ?? "main")
+                : "main"
+            }`,
+          ],
+          ["refs/heads/main", "0123456789abcdef0123456789abcdef01234567"],
+          ["refs/tags/v1.0.0", "0123456789abcdef0123456789abcdef01234567"],
+          ...Object.entries(readMockProjectBranches()[seed.dtag] ?? {}).map(
+            ([branch, commit]) => [`refs/heads/${branch}`, commit],
+          ),
+        ],
+        getConfig()?.mock?.relaySelf ?? owner,
+        now - projectIndex,
+        `mock-repo-state-${seed.dtag}`.replace(/[^a-zA-Z0-9]/g, ""),
+      ),
+    );
 
     for (let dayOffset = historyDays; dayOffset >= 0; dayOffset -= 1) {
       // Roughly half the days are quiet; busy days scale with activityLevel.
@@ -4894,6 +5088,7 @@ function buildMockProjectEvents(): RelayEvent[] {
           ...(kind === KIND_GIT_ISSUE ? [] : [["c", commitHash]]),
           ...(kind === KIND_GIT_PULL_REQUEST
             ? [
+                ["h", "9a1657ac-f7aa-5db0-b632-d8bbeb6dfb50"],
                 ["branch-name", `feature/mock-${dayOffset}-${index}`],
                 [
                   "clone",
@@ -5094,7 +5289,9 @@ async function handleGetChannels(config: E2eConfig | undefined) {
     );
   }
 
-  const channelsReadError = config?.mock?.channelsReadError;
+  const channelsReadError =
+    config?.mock?.channelsReadErrors?.shift() ??
+    config?.mock?.channelsReadError;
   if (channelsReadError) {
     throw new Error(channelsReadError);
   }
@@ -6814,6 +7011,9 @@ function withMockRuntimeConfigMetadata(
   };
 }
 
+let runtimeCatalogDiscoveryCount = 0;
+let mockInstallCompleted = false;
+
 async function handleDiscoverAcpRuntimes(
   config: E2eConfig | undefined,
 ): Promise<RawAcpRuntimeCatalogEntry[]> {
@@ -6824,6 +7024,26 @@ async function handleDiscoverAcpRuntimes(
     });
   }
 
+  const afterInstallSequence =
+    config?.mock?.acpRuntimesCatalogAfterInstallSequence;
+  if (mockInstallCompleted && afterInstallSequence?.length) {
+    const index = Math.min(
+      runtimeCatalogDiscoveryCount,
+      afterInstallSequence.length - 1,
+    );
+    runtimeCatalogDiscoveryCount += 1;
+    return afterInstallSequence[index].map(withMockRuntimeConfigMetadata);
+  }
+  const afterInstall = config?.mock?.acpRuntimesCatalogAfterInstall;
+  if (mockInstallCompleted && afterInstall) {
+    return afterInstall.map(withMockRuntimeConfigMetadata);
+  }
+  const sequence = config?.mock?.acpRuntimesCatalogSequence;
+  if (sequence && sequence.length > 0) {
+    const index = Math.min(runtimeCatalogDiscoveryCount, sequence.length - 1);
+    runtimeCatalogDiscoveryCount += 1;
+    return sequence[index].map(withMockRuntimeConfigMetadata);
+  }
   const configured = config?.mock?.acpRuntimesCatalog;
   if (configured) {
     return configured.map(withMockRuntimeConfigMetadata);
@@ -6841,6 +7061,7 @@ async function handleDiscoverAcpRuntimes(
       install_hint: "Install Goose via the official install script.",
       install_instructions_url: "https://block.github.io/goose/",
       can_auto_install: true,
+      requires_external_cli: true,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
@@ -6859,6 +7080,7 @@ async function handleDiscoverAcpRuntimes(
       install_instructions_url:
         "https://www.npmjs.com/package/@anthropic-ai/claude-agent-acp",
       can_auto_install: true,
+      requires_external_cli: true,
       underlying_cli_path: "/usr/local/bin/claude",
       node_required: false,
       auth_status: { status: "unknown" },
@@ -6877,6 +7099,7 @@ async function handleDiscoverAcpRuntimes(
         "The codex-acp adapter must be built from source. See the GitHub repo.",
       install_instructions_url: "https://github.com/openai/codex",
       can_auto_install: false,
+      requires_external_cli: true,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "unknown" },
@@ -6894,6 +7117,7 @@ async function handleDiscoverAcpRuntimes(
       install_hint: "Ships with the Buzz desktop app.",
       install_instructions_url: "https://github.com/block/buzz",
       can_auto_install: false,
+      requires_external_cli: false,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
@@ -6941,6 +7165,8 @@ async function handleConnectAcpRuntime(
 // Per-page install call counter. Reset each test run because this module is
 // re-evaluated via addInitScript, so the counter starts at 0 for every test.
 let installCallCount = 0;
+/** Per-runtime call counters for `installAcpRuntimeByRuntime` sequences. */
+const installCallCountByRuntime: Record<string, number> = {};
 let addChannelMembersCallCount = 0;
 let agentUsageSeriesCallCount = 0;
 let mockGlobalAgentConfig: {
@@ -6962,6 +7188,31 @@ async function handleInstallAcpRuntime(
   },
   config: E2eConfig | undefined,
 ): Promise<RawInstallRuntimeResult> {
+  const runtimeId = args.runtimeId ?? "";
+  const perRuntime = config?.mock?.installAcpRuntimeByRuntime?.[runtimeId];
+
+  if (perRuntime) {
+    const delayMs = perRuntime.delayMs ?? 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+    const seq = perRuntime.results;
+    if (seq && seq.length > 0) {
+      const idx = Math.min(
+        installCallCountByRuntime[runtimeId] ?? 0,
+        seq.length - 1,
+      );
+      installCallCountByRuntime[runtimeId] = idx + 1;
+      const result = seq[idx];
+      if (result.success) mockInstallCompleted = true;
+      return result;
+    }
+    if (perRuntime.result) {
+      if (perRuntime.result.success) mockInstallCompleted = true;
+      return perRuntime.result;
+    }
+  }
+
   const delayMs = config?.mock?.installAcpRuntimeDelayMs ?? 0;
   if (delayMs > 0) {
     await new Promise((resolve) => window.setTimeout(resolve, delayMs));
@@ -6970,12 +7221,16 @@ async function handleInstallAcpRuntime(
   if (sequence && sequence.length > 0) {
     const idx = Math.min(installCallCount, sequence.length - 1);
     installCallCount++;
-    return sequence[idx];
+    const result = sequence[idx];
+    if (result.success) mockInstallCompleted = true;
+    return result;
   }
   const configured = config?.mock?.installAcpRuntimeResult;
   if (configured) {
+    if (configured.success) mockInstallCompleted = true;
     return configured;
   }
+  mockInstallCompleted = true;
   return {
     success: true,
     steps: [
@@ -7516,6 +7771,11 @@ async function handleCreateManagedAgent(
   };
 
   mockManagedAgents.unshift(managedAgent);
+  if (args.input.spawnAfterCreate && managedAgent.backend.type === "local") {
+    // The real create command spawns a pair runtime on the agent's effective
+    // relay (`start_local_agent_with_preflight`), so mirror that row here.
+    upsertMockManagedAgentRuntime(pubkey, managedAgent.relay_url, "ready");
+  }
   applyMockDisplayName(pubkey, name);
   mockAgentPubkeys.add(pubkey);
   mockProfiles.set(pubkey, {
@@ -7547,6 +7807,55 @@ function getMockManagedAgent(pubkey: string): MockManagedAgent {
   }
 
   return agent;
+}
+
+function upsertMockManagedAgentRuntime(
+  pubkey: string,
+  relayUrl: string,
+  lifecycle: MockManagedAgentRuntimeRow["lifecycle"],
+): MockManagedAgentRuntimeRow {
+  let row = mockManagedAgentRuntimes.find(
+    (candidate) =>
+      candidate.pubkey === pubkey && candidate.relayUrl === relayUrl,
+  );
+  if (!row) {
+    row = {
+      pubkey,
+      relayUrl,
+      localSetup: true,
+      lifecycle,
+      pid: null,
+      error: null,
+      logPath: null,
+    };
+    mockManagedAgentRuntimes.push(row);
+  }
+  row.lifecycle = lifecycle;
+  row.pid =
+    lifecycle === "stopped"
+      ? null
+      : (row.pid ?? 43000 + mockManagedAgentRuntimes.length);
+  row.error = null;
+  return row;
+}
+
+// Pair-scoped lifecycle, mirroring `runtime_commands.rs`: the command touches
+// exactly one agent+relay runtime and rejects non-local agents.
+function handleManagedAgentRuntimeAction(
+  action: "start" | "stop" | "restart",
+  args: { pubkey: string; relayUrl: string },
+): MockManagedAgentRuntimeRow {
+  const agent = getMockManagedAgent(args.pubkey);
+  if (agent.backend.type !== "local") {
+    throw new Error("managed runtime pairs require a local agent");
+  }
+  return {
+    ...upsertMockManagedAgentRuntime(
+      args.pubkey,
+      args.relayUrl,
+      action === "stop" ? "stopped" : "ready",
+    ),
+  };
 }
 
 function isRelayMeshManagedAgent(agent: MockManagedAgent): boolean {
@@ -7590,6 +7899,9 @@ async function handleStartManagedAgent(
   } else {
     agent.status = "running";
     agent.pid = agent.pid ?? 42000 + mockManagedAgents.indexOf(agent);
+    // The real command spawns a pair runtime keyed by the agent's effective
+    // relay (`start_managed_agent_process`), so mirror that row here.
+    upsertMockManagedAgentRuntime(agent.pubkey, agent.relay_url, "ready");
   }
   agent.updated_at = now;
   agent.last_started_at = now;
@@ -7613,6 +7925,15 @@ async function handleStopManagedAgent(args: {
   agent.pid = null;
   agent.updated_at = now;
   agent.last_stopped_at = now;
+  // Legacy agent-wide stop deliberately drains EVERY pair runtime for the
+  // agent (`runtime/stop.rs`) — mirror that so specs can prove the sidebar
+  // no longer routes through it.
+  for (const row of mockManagedAgentRuntimes) {
+    if (row.pubkey === args.pubkey) {
+      row.lifecycle = "stopped";
+      row.pid = null;
+    }
+  }
   setMockPresenceStatus(agent.pubkey, "offline");
   agent.log_lines.push(`stopped mock harness at ${now}`);
   syncMockRelayAgentsFromManagedAgents();
@@ -8371,6 +8692,11 @@ async function connectRealSocket(args: { url?: string; onMessage: unknown }) {
 }
 
 async function connectMockSocket(args: { onMessage: unknown }) {
+  const connectError = getConfig()?.mock?.websocketConnectErrors?.shift();
+  if (connectError) {
+    throw new Error(connectError);
+  }
+
   if (mockWebsocketSendMutexWedged) {
     return new Promise<number>(() => {});
   }
@@ -8619,6 +8945,11 @@ function sendToMockSocket(args: {
         accepted,
         accepted ? "" : "Invalid relay admin event.",
       ]);
+      return;
+    }
+
+    if (event.kind === 9033) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
 
@@ -8951,6 +9282,14 @@ export function maybeInstallE2eTauriMocks() {
     for (const socketId of socketIds) disconnectMockSocket(socketId);
     return socketIds.length;
   };
+  window.__BUZZ_E2E_RESTART_MOCK_WEBSOCKETS__ = () => {
+    const sockets = [...mockSockets.values()];
+    mockSockets.clear();
+    for (const socket of sockets) {
+      sendWsClose(socket.handler, 1012, "relay restarting");
+    }
+    return sockets.length;
+  };
   // Tests vary mesh admission and models to exercise provider discovery and
   // the managed-agent start preflight.
   window.__BUZZ_E2E_SET_MESH__ = (mesh) => {
@@ -8958,6 +9297,13 @@ export function maybeInstallE2eTauriMocks() {
     if (mesh.models !== undefined) mockMeshState.models = mesh.models;
     if (mesh.denyReason !== undefined)
       mockMeshState.denyReason = mesh.denyReason;
+    if (mesh.nodeState !== undefined) mockMeshState.nodeState = mesh.nodeState;
+    if (mesh.nodeMode !== undefined) mockMeshState.nodeMode = mesh.nodeMode;
+    if (mesh.servingUsage !== undefined)
+      mockMeshState.servingUsage = {
+        ...mockMeshState.servingUsage,
+        ...mesh.servingUsage,
+      };
   };
   let seedTurnSeq = Date.now();
   window.__BUZZ_E2E_SEED_ACTIVE_TURNS__ = ({
@@ -9077,6 +9423,8 @@ export function maybeInstallE2eTauriMocks() {
         return mockMeshState.models;
       case "mesh_node_status":
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
+      case "mesh_serving_usage":
+        return mockMeshState.servingUsage;
       case "mesh_start_node": {
         const req = (
           payload as { request?: { mode?: "serve" | "client" } } | null
@@ -9086,6 +9434,14 @@ export function maybeInstallE2eTauriMocks() {
         return meshNodeStatus(mockMeshState.nodeState, mockMeshState.nodeMode);
       }
       case "mesh_stop_node":
+        // Mirror the backend contract: "stop sharing" must never tear down a
+        // client (consume) node occupying the single slot. Leave it running.
+        if (mockMeshState.nodeMode === "client") {
+          return meshNodeStatus(
+            mockMeshState.nodeState,
+            mockMeshState.nodeMode,
+          );
+        }
         mockMeshState.nodeState = "off";
         mockMeshState.nodeMode = null;
         return meshNodeStatus("off", null);
@@ -9135,6 +9491,11 @@ export function maybeInstallE2eTauriMocks() {
           sig: "e2e-signed-nostr-binding",
         });
       }
+      case "sign_out":
+        // Production wipes local state and restarts the app. In the browser
+        // harness there is nothing to wipe; resolving is enough — specs
+        // assert invocation via __BUZZ_E2E_COMMANDS__ and the pending UI.
+        return;
       case "get_nsec": {
         const nsecSequence = activeConfig?.mock?.nsecErrors;
         if (nsecSequence && nsecSequence.length > 0) {
@@ -9192,6 +9553,13 @@ export function maybeInstallE2eTauriMocks() {
       case "update_profile":
         return handleUpdateProfile(
           payload as Parameters<typeof handleUpdateProfile>[0],
+          activeConfig,
+        );
+      case "update_profile_at_relay":
+        return handleUpdateProfile(
+          {
+            avatarUrl: (payload as { avatarUrl: string }).avatarUrl,
+          },
           activeConfig,
         );
       case "get_user_profile":
@@ -9389,6 +9757,7 @@ export function maybeInstallE2eTauriMocks() {
           window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ ?? {
             local_path: null,
             local_branch: null,
+            local_branches: [],
             local_head: null,
             local_short_head: null,
             remote_branch: "main",
@@ -9441,6 +9810,7 @@ export function maybeInstallE2eTauriMocks() {
         window.__BUZZ_E2E_PROJECT_REPO_SYNC_STATUS__ = {
           local_path: path,
           local_branch: "main",
+          local_branches: ["main"],
           local_head: commit,
           local_short_head: commit.slice(0, 7),
           remote_branch: "main",
@@ -9461,6 +9831,111 @@ export function maybeInstallE2eTauriMocks() {
           cloned: true,
           message: "Cloned repository.",
         };
+      }
+      case "create_project_remote_branch": {
+        const input = payload as {
+          cloneUrl: string;
+          expectedCommit: string;
+          newBranch: string;
+          sourceBranch: string;
+        };
+        const dtag = new URL(input.cloneUrl).pathname
+          .split("/")
+          .filter(Boolean)
+          .at(-1)
+          ?.replace(/\.git$/, "");
+        const repoState = getMockProjectEventStore().find(
+          (event) =>
+            event.kind === KIND_REPO_STATE &&
+            event.tags.some((tag) => tag[0] === "d" && tag[1] === dtag),
+        );
+        if (repoState) {
+          repoState.tags = repoState.tags.filter(
+            (tag) => tag[0] !== `refs/heads/${input.newBranch}`,
+          );
+          repoState.tags.push([
+            `refs/heads/${input.newBranch}`,
+            input.expectedCommit,
+          ]);
+          repoState.created_at = Math.floor(Date.now() / 1000);
+        }
+        if (dtag) {
+          writeMockProjectBranch(dtag, input.newBranch, input.expectedCommit);
+        }
+        return {
+          branch: input.newBranch,
+          commit: input.expectedCommit,
+          message: `Created branch ${input.newBranch} from ${input.sourceBranch}.`,
+        };
+      }
+      case "delete_project_remote_branch": {
+        const input = payload as {
+          branch: string;
+          cloneUrl: string;
+          expectedCommit: string;
+        };
+        const dtag = new URL(input.cloneUrl).pathname
+          .split("/")
+          .filter(Boolean)
+          .at(-1)
+          ?.replace(/\.git$/, "");
+        const repoState = getMockProjectEventStore().find(
+          (event) =>
+            event.kind === KIND_REPO_STATE &&
+            event.tags.some((tag) => tag[0] === "d" && tag[1] === dtag),
+        );
+        if (repoState) {
+          repoState.tags = repoState.tags.filter(
+            (tag) => tag[0] !== `refs/heads/${input.branch}`,
+          );
+          repoState.created_at = Math.floor(Date.now() / 1000);
+        }
+        if (dtag) {
+          writeMockProjectBranch(dtag, input.branch, null);
+        }
+        return {
+          branch: input.branch,
+          commit: input.expectedCommit,
+          message: `Deleted branch ${input.branch}.`,
+        };
+      }
+      case "sign_project_pull_request_status": {
+        const { input } = payload as {
+          input: {
+            createdAt: number;
+            pullRequestAuthor: string;
+            pullRequestId: string;
+            repoAddress: string;
+            status: "open" | "draft" | "closed";
+            targetOwner: string;
+          };
+        };
+        const kind = {
+          open: KIND_GIT_STATUS_OPEN,
+          draft: KIND_GIT_STATUS_DRAFT,
+          closed: KIND_GIT_STATUS_CLOSED,
+        }[input.status];
+        const recipientPubkeys = Array.from(
+          new Set(
+            [input.targetOwner, input.pullRequestAuthor].map((pubkey) =>
+              pubkey.trim().toLowerCase(),
+            ),
+          ),
+        );
+        const event = createMockEvent(
+          kind,
+          "",
+          [
+            ["e", input.pullRequestId, "", "root"],
+            ["a", input.repoAddress],
+            ...recipientPubkeys.map((pubkey) => ["p", pubkey]),
+          ],
+          input.targetOwner,
+          input.createdAt,
+        );
+        window.__BUZZ_E2E_SIGNED_EVENTS__?.push(event);
+        getMockProjectEventStore().push(event);
+        return null;
       }
       case "sign_project_pull_request_review_request": {
         const { input } = payload as {
@@ -9591,6 +10066,8 @@ export function maybeInstallE2eTauriMocks() {
         return getRelayWsUrl(activeConfig);
       case "get_default_relay_url":
         return getRelayWsUrl(activeConfig);
+      case "auto_connect_default_relay_enabled":
+        return activeConfig?.autoConnectDefaultRelay ?? false;
       case "get_legacy_workspace_storage":
         return {
           workspaces: null,
@@ -9725,6 +10202,19 @@ export function maybeInstallE2eTauriMocks() {
         );
       case "list_teams":
         return handleListTeams();
+      case "list_channel_templates":
+        return (activeConfig?.mock?.channelTemplates ?? []).map((template) => ({
+          id: template.id,
+          name: template.name,
+          description: template.description,
+          channel_type: template.channelType,
+          visibility: template.visibility,
+          canvas_template: template.canvasTemplate,
+          agents: template.agents,
+          is_builtin: template.isBuiltin,
+          created_at: template.createdAt,
+          updated_at: template.updatedAt,
+        }));
       case "create_team":
         return handleCreateTeam(
           payload as Parameters<typeof handleCreateTeam>[0],
@@ -9903,6 +10393,26 @@ export function maybeInstallE2eTauriMocks() {
         return handleStopManagedAgent(
           payload as Parameters<typeof handleStopManagedAgent>[0],
         );
+      case "list_managed_agent_runtimes":
+        return mockManagedAgentRuntimes.map((row) => ({ ...row }));
+      case "start_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "start",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "stop_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "stop",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "restart_managed_agent_runtime":
+        return handleManagedAgentRuntimeAction(
+          "restart",
+          payload as { pubkey: string; relayUrl: string },
+        );
+      case "reconcile_managed_agent_runtimes":
+        // Post-create bootstrap reconcile: no new pairs in the mock world.
+        return [];
       case "set_agent_managed_profiles":
         return undefined;
       case "set_managed_agent_auto_restart":
@@ -9933,6 +10443,25 @@ export function maybeInstallE2eTauriMocks() {
           supportsSwitching: false,
         };
       case "discover_agent_models": {
+        const discoverError = activeConfig?.mock?.discoverAgentModelsError;
+        if (discoverError) {
+          throw new Error(discoverError);
+        }
+        const discoverOverride = activeConfig?.mock?.discoverAgentModels;
+        if (discoverOverride) {
+          return {
+            agentName: "mock-agent",
+            agentVersion: "0.0.0",
+            models: discoverOverride.models.map((model) => ({
+              id: model.id,
+              name: model.name,
+              description: model.description ?? null,
+            })),
+            agentDefaultModel: discoverOverride.agentDefaultModel ?? null,
+            selectedModel: discoverOverride.selectedModel ?? null,
+            supportsSwitching: discoverOverride.supportsSwitching,
+          };
+        }
         const input = (
           payload as {
             input?: { agentCommand?: string; provider?: string };
@@ -10022,9 +10551,10 @@ export function maybeInstallE2eTauriMocks() {
         return buildMockConfigSurface(configArgs.pubkey);
       }
       case "get_runtime_file_config": {
-        // No harness config file in the E2E environment — return null so
-        // dialogs fall back to normal required-field evaluation.
-        return null;
+        const runtimeId = (payload as { runtimeId?: string } | null | undefined)
+          ?.runtimeId;
+        if (!runtimeId) return null;
+        return config.mock?.runtimeFileConfigs?.[runtimeId] ?? null;
       }
       case "get_global_agent_config": {
         // Return the mutable persisted mock value, seeded from the test config.
@@ -10462,6 +10992,11 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
         return Math.floor(Math.random() * 1_000_000);
+      case "start_pairing":
+        return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
+      case "cancel_pairing":
+      case "confirm_pairing_sas":
+        return null;
       // ── NIP-IA identity archival ────────────────────────────────────────
       // These mocks drive the archive-button gate matrix in
       // tests/e2e/identity-archive.spec.ts. Defaults keep the button hidden
