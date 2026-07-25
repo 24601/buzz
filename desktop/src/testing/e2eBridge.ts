@@ -3,6 +3,11 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { decode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
+import {
+  mockCustomHarnesses,
+  handleSaveCustomHarness,
+  handleDeleteCustomHarness,
+} from "./e2eBridgeCustomHarnesses.ts";
 
 import { relayClient } from "@/shared/api/relayClient";
 import type { ConnectionState } from "@/shared/api/relayClientShared";
@@ -7039,7 +7044,10 @@ async function handleDiscoverAcpRuntimes(
       login_hint: undefined,
     },
   ];
-  return defaultCatalog.map(withMockRuntimeConfigMetadata);
+  return [
+    ...defaultCatalog.map(withMockRuntimeConfigMetadata),
+    ...Array.from(mockCustomHarnesses.values()),
+  ];
 }
 
 async function handleDiscoverAcpAuthMethods(
@@ -10008,6 +10016,14 @@ export function maybeInstallE2eTauriMocks() {
         return activeConfig?.mock?.relayRequiresMembership ?? false;
       case "discover_acp_providers":
         return handleDiscoverAcpRuntimes(activeConfig);
+      case "save_custom_harness":
+        return handleSaveCustomHarness(
+          payload as Parameters<typeof handleSaveCustomHarness>[0],
+        );
+      case "delete_custom_harness":
+        return handleDeleteCustomHarness(
+          payload as Parameters<typeof handleDeleteCustomHarness>[0],
+        );
       case "discover_acp_auth_methods":
         return handleDiscoverAcpAuthMethods(
           payload as { runtimeId?: string },

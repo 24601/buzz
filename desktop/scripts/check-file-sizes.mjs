@@ -337,7 +337,7 @@ const overrides = new Map([
   // +29: rebase over main (#2680) — discover_acp_runtime_phase1 extracted
   // helper + discover_acp_runtime_availability; both load-bearing for
   // post-install verification. Semantic composition with BYOH changes.
-  ["src-tauri/src/managed_agents/discovery.rs", 1706],
+  ["src-tauri/src/managed_agents/discovery.rs", 1715],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +

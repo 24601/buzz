@@ -1440,7 +1440,14 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         command: "openclaw",
         args: &["acp"],
         install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
-        install_hint: "Install OpenClaw: npm install -g openclaw@latest.",
+        install_hint: "Install OpenClaw: npm install -g openclaw@latest.\n\n\
+            ⚠️  Execution-locus note: `openclaw acp` runs tools inside the \
+            OpenClaw Gateway daemon, not in the Desktop process. \
+            Desktop-injected BUZZ_* env vars are visible to the `openclaw` \
+            harness process itself, but do NOT automatically reach the \
+            Gateway's execution environment. If your tools or agent logic \
+            needs BUZZ_* credentials at execution time, set them on the \
+            Gateway's own environment separately.",
     },
 ];
 
