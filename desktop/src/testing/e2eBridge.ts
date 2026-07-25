@@ -6994,6 +6994,7 @@ async function handleDiscoverAcpRuntimes(
       install_hint: "Install Goose via the official install script.",
       install_instructions_url: "https://block.github.io/goose/",
       can_auto_install: true,
+      requires_external_cli: true,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
@@ -7012,6 +7013,7 @@ async function handleDiscoverAcpRuntimes(
       install_instructions_url:
         "https://www.npmjs.com/package/@anthropic-ai/claude-agent-acp",
       can_auto_install: true,
+      requires_external_cli: true,
       underlying_cli_path: "/usr/local/bin/claude",
       node_required: false,
       auth_status: { status: "unknown" },
@@ -7030,6 +7032,7 @@ async function handleDiscoverAcpRuntimes(
         "The codex-acp adapter must be built from source. See the GitHub repo.",
       install_instructions_url: "https://github.com/openai/codex",
       can_auto_install: false,
+      requires_external_cli: true,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "unknown" },
@@ -7047,6 +7050,7 @@ async function handleDiscoverAcpRuntimes(
       install_hint: "Ships with the Buzz desktop app.",
       install_instructions_url: "https://github.com/block/buzz",
       can_auto_install: false,
+      requires_external_cli: false,
       underlying_cli_path: null,
       node_required: false,
       auth_status: { status: "not_applicable" },
@@ -8916,6 +8920,11 @@ function sendToMockSocket(args: {
         accepted,
         accepted ? "" : "Invalid relay admin event.",
       ]);
+      return;
+    }
+
+    if (event.kind === 9033) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
     }
 
@@ -11030,6 +11039,11 @@ export function maybeInstallE2eTauriMocks() {
       case "plugin:event|listen":
         // Tauri event system (pairing, huddle) — no-op in e2e, return unlisten fn ID
         return Math.floor(Math.random() * 1_000_000);
+      case "start_pairing":
+        return "nostrpair://8f4b8db31967ce14fef970a1ff1e8eecf19a430aa1c83875e2f5be68dcac0f1a?relay=wss%3A%2F%2Frelay.example.com&secret=87d5a8cfd5807a0cb44f728b67d88d6dcb8daf99be137c158f21a50c1e913c0a&v=1";
+      case "cancel_pairing":
+      case "confirm_pairing_sas":
+        return null;
       // ── NIP-IA identity archival ────────────────────────────────────────
       // These mocks drive the archive-button gate matrix in
       // tests/e2e/identity-archive.spec.ts. Defaults keep the button hidden
