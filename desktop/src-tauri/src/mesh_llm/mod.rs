@@ -258,15 +258,6 @@ pub struct MeshServingUsage {
     pub peers: u64,
 }
 
-#[cfg(test)]
-impl MeshServingUsage {
-    /// True when at least one request has been served for a non-local consumer.
-    #[cfg(test)]
-    pub fn has_remote_consumers(&self) -> bool {
-        self.remote_attempts > 0 || self.endpoint_attempts > 0
-    }
-}
-
 /// Pure extractor: project a raw SDK status payload into [`MeshServingUsage`].
 ///
 /// Every field is read defensively (missing → 0) so an SDK shape change
