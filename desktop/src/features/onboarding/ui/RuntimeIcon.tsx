@@ -18,13 +18,15 @@ const RUNTIME_LOGOS: Record<string, string> = {
 
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
 // Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
-const PRESET_LOGOS: Record<string, string> = {
+export const PRESET_LOGOS: Record<string, string> = {
   cursor: "/harness-logos/cursor.png",
   omp: "/harness-logos/omp.png",
   grok: "/harness-logos/grok.png",
   opencode: "/harness-logos/opencode.svg",
   kimi: "/harness-logos/kimi.png",
   amp: "/harness-logos/amp.png",
+  hermes: "/harness-logos/hermes.png",
+  openclaw: "/harness-logos/openclaw.svg",
 };
 
 function isBuzzRuntime(runtime: AcpRuntimeCatalogEntry): boolean {

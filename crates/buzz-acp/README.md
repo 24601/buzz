@@ -306,7 +306,7 @@ To add a new runtime to the tier-2 gallery:
 1. **Verify the ACP entrypoint** from the vendor's own documentation — do not rely on a PR description alone. Test with the actual binary.
 2. **Add a `HarnessDefinition` entry** to the `PRESET_HARNESSES` slice in `desktop/src-tauri/src/managed_agents/discovery.rs`. Fill `id`, `label`, `command`, `args`, `install_instructions_url`, `install_hint`. Leave `env` empty unless the harness requires a specific env var to enable ACP mode.
 3. **Add the preset id to `BUILTIN_IDS`** in `desktop/src-tauri/src/managed_agents/custom_harnesses.rs` so custom JSON files cannot shadow it.
-4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`.
+4. **Add a bundled logo** (64×64 PNG or optimised SVG) to `desktop/public/harness-logos/<id>.png` and add a corresponding entry to `PRESET_LOGOS` in `desktop/src/features/onboarding/ui/RuntimeIcon.tsx`. Record the source and license in `desktop/public/harness-logos/CREDITS.md`. Only bundle a mark whose upstream license permits redistribution; skipping this step is caught by `presetLogos.test.mjs`, which asserts every `PRESET_HARNESSES` id has a mapped logo that exists on disk.
 5. Run `cargo test --lib` and `just desktop-typecheck` to verify everything compiles.
 
 The built-in `BUILTIN_IDS` set (`goose`, `claude`, `codex`, `buzz-agent`, and all current preset ids) is the reserved namespace; every other id is available for custom harnesses.
