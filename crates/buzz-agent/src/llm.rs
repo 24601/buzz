@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -41,6 +42,32 @@ enum MeshCatalogObservation {
     Available,
     Unavailable,
     Unknown,
+}
+
+fn mesh_catalog_supports_collective(catalog: &Value) -> Option<bool> {
+    let models = catalog.get("data").and_then(Value::as_array)?;
+    let mut has_virtual_mesh = false;
+    let mut physical_models = BTreeSet::new();
+    for id in models
+        .iter()
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        if id == MESH_VIRTUAL_MODEL_ID {
+            has_virtual_mesh = true;
+        } else if id != MESH_AUTO_MODEL_ID {
+            physical_models.insert(id.replace("@main", ""));
+        }
+    }
+    Some(has_virtual_mesh && physical_models.len() >= 2)
+}
+
+fn looks_like_unstructured_tool_call(text: &str) -> bool {
+    let text = text.trim_start().to_ascii_lowercase();
+    text.starts_with("<|tool_call")
+        || text.starts_with("<tool_call")
+        || text.starts_with("[tool_call]")
 }
 
 #[derive(Debug, Default)]
@@ -120,24 +147,37 @@ impl Llm {
                 parse_anthropic(v)
             }
             Provider::OpenAi | Provider::Databricks => {
-                self.openai_request(cfg, effective_model, |use_responses, request_model| {
-                    // Normalize effort for model-specific availability. Startup no longer rejects
-                    // `max` for pure OpenAI/Databricks; this per-model table is the single authority
-                    // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
-                    // models, and still applies corrections like none→minimal on the gpt-5 base.
-                    let e = effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
-                    if use_responses {
-                        (
-                            responses_body(cfg, system_prompt, history, tools, request_model, e),
-                            parse_responses as OpenAiParse,
-                        )
-                    } else {
-                        (
-                            openai_body(cfg, system_prompt, history, tools, request_model, e),
-                            parse_openai as OpenAiParse,
-                        )
-                    }
-                })
+                self.openai_request(
+                    cfg,
+                    effective_model,
+                    !tools.is_empty(),
+                    |use_responses, request_model| {
+                        // Normalize effort for model-specific availability. Startup no longer rejects
+                        // `max` for pure OpenAI/Databricks; this per-model table is the single authority
+                        // — it keeps `max` for gpt-5.6, clamps `max`→`xhigh` for other OpenAI-shaped
+                        // models, and still applies corrections like none→minimal on the gpt-5 base.
+                        let e =
+                            effort.map(|ef| normalize_effort_for_openai_route(ef, request_model));
+                        if use_responses {
+                            (
+                                responses_body(
+                                    cfg,
+                                    system_prompt,
+                                    history,
+                                    tools,
+                                    request_model,
+                                    e,
+                                ),
+                                parse_responses as OpenAiParse,
+                            )
+                        } else {
+                            (
+                                openai_body(cfg, system_prompt, history, tools, request_model, e),
+                                parse_openai as OpenAiParse,
+                            )
+                        }
+                    },
+                )
                 .await
             }
             Provider::DatabricksV2 => {
@@ -210,32 +250,37 @@ impl Llm {
             }
             Provider::OpenAi | Provider::Databricks => {
                 let r = self
-                    .openai_request(cfg, effective_model, |use_responses, request_model| {
-                        if use_responses {
-                            (
-                                json!({
-                                    "model": request_model,
-                                    "max_output_tokens": max_output_tokens,
-                                    "instructions": system_prompt,
-                                    "input": user_prompt,
-                                }),
-                                parse_responses as OpenAiParse,
-                            )
-                        } else {
-                            (
-                                json!({
-                                    "model": request_model,
-                                    "stream": false,
-                                    "max_completion_tokens": max_output_tokens,
-                                    "messages": [
-                                        { "role": "system", "content": system_prompt },
-                                        { "role": "user", "content": user_prompt },
-                                    ],
-                                }),
-                                parse_openai as OpenAiParse,
-                            )
-                        }
-                    })
+                    .openai_request(
+                        cfg,
+                        effective_model,
+                        false,
+                        |use_responses, request_model| {
+                            if use_responses {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "max_output_tokens": max_output_tokens,
+                                        "instructions": system_prompt,
+                                        "input": user_prompt,
+                                    }),
+                                    parse_responses as OpenAiParse,
+                                )
+                            } else {
+                                (
+                                    json!({
+                                        "model": request_model,
+                                        "stream": false,
+                                        "max_completion_tokens": max_output_tokens,
+                                        "messages": [
+                                            { "role": "system", "content": system_prompt },
+                                            { "role": "user", "content": user_prompt },
+                                        ],
+                                    }),
+                                    parse_openai as OpenAiParse,
+                                )
+                            }
+                        },
+                    )
                     .await?;
                 Ok(r.text)
             }
@@ -300,6 +345,7 @@ impl Llm {
         &self,
         cfg: &Config,
         effective_model: &str,
+        tools_supplied: bool,
         mut build: F,
     ) -> Result<LlmResponse, AgentError>
     where
@@ -314,13 +360,7 @@ impl Llm {
             .await;
         match first {
             Err(PostError::MeshFallback(detail)) if adaptive_mesh => {
-                let now = Instant::now();
-                let mut state = self.mesh_auto_state.lock().await;
-                state.last_checked = Some(now);
-                state.consecutive_available = 0;
-                state.collective_enabled = false;
-                state.cooldown_until = Some(now + MESH_AUTO_COOLDOWN);
-                drop(state);
+                self.cool_down_collective().await;
                 tracing::warn!(
                     configured_model = effective_model,
                     attempted_model = MESH_VIRTUAL_MODEL_ID,
@@ -332,9 +372,35 @@ impl Llm {
                     .await
                     .map_err(PostError::into_agent)
             }
+            Ok(response)
+                if adaptive_mesh
+                    && tools_supplied
+                    && response.tool_calls.is_empty()
+                    && looks_like_unstructured_tool_call(&response.text) =>
+            {
+                self.cool_down_collective().await;
+                tracing::warn!(
+                    configured_model = effective_model,
+                    attempted_model = MESH_VIRTUAL_MODEL_ID,
+                    fallback_model = MESH_AUTO_MODEL_ID,
+                    "relay-mesh auto: collective response emitted unstructured tool markup; retrying once with auto"
+                );
+                self.openai_request_for_model(cfg, MESH_AUTO_MODEL_ID, &mut build)
+                    .await
+                    .map_err(PostError::into_agent)
+            }
             Ok(response) => Ok(response),
             Err(error) => Err(error.into_agent()),
         }
+    }
+
+    async fn cool_down_collective(&self) {
+        let now = Instant::now();
+        let mut state = self.mesh_auto_state.lock().await;
+        state.last_checked = Some(now);
+        state.consecutive_available = 0;
+        state.collective_enabled = false;
+        state.cooldown_until = Some(now + MESH_AUTO_COOLDOWN);
     }
 
     /// Resolve the model for one OpenAI-family request. Explicit model choices
@@ -441,15 +507,12 @@ impl Llm {
         }
         match response.json::<Value>().await {
             Ok(catalog) => {
-                let Some(models) = catalog.get("data").and_then(Value::as_array) else {
+                let Some(available) = mesh_catalog_supports_collective(&catalog) else {
                     tracing::debug!(
                         "relay-mesh auto: catalog response has no data array; preserving last confirmed route"
                     );
                     return MeshCatalogObservation::Unknown;
                 };
-                let available = models.iter().any(|model| {
-                    model.get("id").and_then(Value::as_str) == Some(MESH_VIRTUAL_MODEL_ID)
-                });
                 if available {
                     MeshCatalogObservation::Available
                 } else {
@@ -1714,9 +1777,41 @@ mod tests {
         .await
     }
 
+    async fn complete_model_with_tool(
+        llm: &Llm,
+        cfg: &Config,
+        model: &str,
+    ) -> Result<LlmResponse, AgentError> {
+        llm.complete(
+            cfg,
+            "system",
+            &[HistoryItem::User("add two numbers".into())],
+            &[ToolDef {
+                name: "add_numbers".into(),
+                description: "Add two numbers".into(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "a": {"type": "number"},
+                        "b": {"type": "number"}
+                    },
+                    "required": ["a", "b"]
+                }),
+            }],
+            model,
+        )
+        .await
+    }
+
     async fn expire_mesh_catalog_check(llm: &Llm) {
         llm.mesh_auto_state.lock().await.last_checked =
             Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
+    }
+
+    async fn expire_mesh_auto_cooldown(llm: &Llm) {
+        let mut state = llm.mesh_auto_state.lock().await;
+        state.last_checked = Some(Instant::now() - MESH_AUTO_CATALOG_TTL);
+        state.cooldown_until = Some(Instant::now() - std::time::Duration::from_secs(1));
     }
 
     fn posted_models(requests: &[CapturedHttpRequest]) -> Vec<&str> {
@@ -1789,6 +1884,81 @@ mod tests {
         assert_eq!(
             posted_models(&requests),
             vec!["auto", "auto", "auto", "mesh"]
+        );
+    }
+
+    #[test]
+    fn collective_catalog_requires_two_distinct_physical_models() {
+        assert_eq!(mesh_catalog_supports_collective(&json!({})), None);
+        assert_eq!(
+            mesh_catalog_supports_collective(&model_catalog(&[])),
+            Some(false)
+        );
+        assert_eq!(
+            mesh_catalog_supports_collective(&model_catalog(&["model-a", "mesh"])),
+            Some(false)
+        );
+        assert_eq!(
+            mesh_catalog_supports_collective(&model_catalog(&[
+                "org/model@main:Q4",
+                "org/model:Q4",
+                "mesh"
+            ])),
+            Some(false),
+            "two spellings of one model are not collective capacity"
+        );
+        assert_eq!(
+            mesh_catalog_supports_collective(&model_catalog(&["model-a", "model-b", "mesh"])),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_auto_tracks_models_appearing_disappearing_and_reappearing() {
+        let (base_url, captured) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(model_catalog(&[])),
+            StubHttpResponse::ok(chat_response("zero")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
+            StubHttpResponse::ok(chat_response("one")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("two-first-observation")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("two-stable")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "mesh"])),
+            StubHttpResponse::ok(chat_response("contracted")),
+            StubHttpResponse::ok(model_catalog(&[])),
+            StubHttpResponse::ok(chat_response("empty-again")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("rejoin-first-observation")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("rejoined-stable")),
+        ])
+        .await;
+        let mut config = cfg(Provider::OpenAi);
+        config.base_url = base_url;
+        config.prefer_mesh_for_auto = true;
+        let llm = Llm::new(&config).unwrap();
+
+        for call in 0..8 {
+            if call == 5 {
+                expire_mesh_auto_cooldown(&llm).await;
+            } else if call > 0 {
+                expire_mesh_catalog_check(&llm).await;
+            }
+            complete_model(&llm, &config, "auto").await.unwrap();
+        }
+
+        let requests = captured.lock().await;
+        assert_eq!(
+            posted_models(&requests),
+            vec!["auto", "auto", "auto", "mesh", "auto", "auto", "auto", "mesh"]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/v1/models")
+                .count(),
+            8
         );
     }
 
@@ -1877,6 +2047,56 @@ mod tests {
                 .count(),
             2,
             "mesh-specific failure must enter cooldown without re-probing"
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_auto_retries_unstructured_tool_markup_through_auto() {
+        let (base_url, captured) = spawn_sequence_stub(vec![
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response("warmup")),
+            StubHttpResponse::ok(model_catalog(&["model-a", "model-b", "mesh"])),
+            StubHttpResponse::ok(chat_response(
+                "<|tool_call>call:add_numbers{a:17,b:25}<tool_call|>",
+            )),
+            StubHttpResponse::ok(chat_response("safe fallback")),
+            StubHttpResponse::ok(chat_response("cooldown")),
+        ])
+        .await;
+        let mut config = cfg(Provider::OpenAi);
+        config.base_url = base_url;
+        config.prefer_mesh_for_auto = true;
+        let llm = Llm::new(&config).unwrap();
+
+        complete_model(&llm, &config, "auto").await.unwrap();
+        expire_mesh_catalog_check(&llm).await;
+        assert_eq!(
+            complete_model_with_tool(&llm, &config, "auto")
+                .await
+                .unwrap()
+                .text,
+            "safe fallback"
+        );
+        assert_eq!(
+            complete_model_with_tool(&llm, &config, "auto")
+                .await
+                .unwrap()
+                .text,
+            "cooldown"
+        );
+
+        let requests = captured.lock().await;
+        assert_eq!(
+            posted_models(&requests),
+            vec!["auto", "mesh", "auto", "auto"]
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.path == "/v1/models")
+                .count(),
+            2,
+            "pseudo tool markup must enter cooldown without another catalog probe"
         );
     }
 

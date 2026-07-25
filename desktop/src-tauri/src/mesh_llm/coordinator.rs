@@ -68,8 +68,7 @@ pub async fn start_coordinator(app: AppHandle) {
         let mut pending_shrink: Option<Vec<String>> = None;
         loop {
             tokio::time::sleep(ROSTER_POLL_INTERVAL).await;
-            let state = roster_app.state::<AppState>();
-            if let Err(error) = reconcile_roster(&state, &mut pending_shrink).await {
+            if let Err(error) = reconcile_roster(&roster_app, &mut pending_shrink).await {
                 eprintln!("buzz-mesh: roster reconcile failed: {error}");
             }
         }
@@ -261,9 +260,10 @@ fn roster_reconcile_action(
 }
 
 async fn reconcile_roster(
-    state: &AppState,
+    app: &AppHandle,
     pending_shrink: &mut Option<Vec<String>>,
 ) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let current_request = {
         let runtime = state.mesh_llm_runtime.lock().await;
         match runtime.as_ref() {
@@ -283,7 +283,7 @@ async fn reconcile_roster(
     // other member on a transient relay blip (the flapping restart loop). Keep
     // the current allowlist and try again on the next poll. A shrink is held
     // for one extra poll (hysteresis) so a single short-read never tears down.
-    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(state).await;
+    let query = crate::commands::mesh_llm::resolve_trusted_owner_ids(&state).await;
     let fresh = match roster_reconcile_action(current_owners, pending_shrink.as_deref(), query) {
         RosterReconcileAction::Keep => {
             *pending_shrink = None;
@@ -300,8 +300,27 @@ async fn reconcile_roster(
         }
     };
 
-    let mut request = current_request;
+    let mut request = current_request.clone();
     request.trusted_owner_ids = Some(fresh);
+    // Bootstrap endpoints are live device state, not configuration. The
+    // endpoint used at the previous start may belong to the member that just
+    // left or to a device whose iroh identity rotated while offline. Resolve a
+    // fresh validated peer for this restart; starting isolated is safe because
+    // the join watcher will converge it when a member next publishes.
+    request.join_token = match crate::commands::mesh_llm::resolve_buzz_mesh_join_targets(&state)
+        .await
+    {
+        Ok(targets) => targets
+            .into_iter()
+            .next()
+            .map(|target| target.endpoint_addr),
+        Err(error) => {
+            eprintln!(
+                "buzz-mesh: could not refresh bootstrap endpoint for roster restart; starting isolated: {error}"
+            );
+            None
+        }
+    };
     let mut guard = state.mesh_llm_runtime.lock().await;
     let startup_pending = match guard.as_ref() {
         Some(runtime) => runtime.is_starting().await,
@@ -313,12 +332,29 @@ async fn reconcile_roster(
         );
         return Ok(());
     }
+    if guard
+        .as_ref()
+        .is_some_and(|runtime| runtime.start_request() != &current_request)
+    {
+        // The runtime changed while relay discovery was in flight. Its own
+        // request is now authoritative; the next poll will reconcile that
+        // runtime instead of tearing down a fresh replacement from this stale
+        // snapshot.
+        return Ok(());
+    }
     let Some(running) = guard.take() else {
         return Ok(());
     };
     eprintln!("buzz-mesh: membership roster changed; restarting mesh node with fresh allowlist");
     if let Err(error) = running.stop().await {
-        eprintln!("buzz-mesh: stopping mesh node for roster restart failed: {error}");
+        drop(guard);
+        eprintln!(
+            "buzz-mesh: stopping mesh node for roster restart failed; restarting Buzz instead of racing the occupied ingress: {error}"
+        );
+        app.request_restart();
+        return Err(format!(
+            "mesh node shutdown failed during roster change: {error}"
+        ));
     }
     let replacement = crate::mesh_llm::DesktopMeshRuntime::start(request)
         .await

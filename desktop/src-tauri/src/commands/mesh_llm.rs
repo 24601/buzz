@@ -61,7 +61,9 @@ fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
 pub type CmdResult<T> = Result<T, String>;
 
 fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
-    let normalized = relay_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let normalized = url::Url::parse(relay_url.trim())
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| relay_url.trim().trim_end_matches('/').to_ascii_lowercase());
     let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
     format!("buzz-community-{}", &digest[..32])
 }
@@ -494,13 +496,21 @@ pub(crate) async fn ensure_client_node_for_model(
         mode: mesh_llm::MeshNodeMode::Client,
         model_id: None,
         max_vram_gb: None,
-        join_token: Some(join_token),
+        join_token: Some(join_token.clone()),
         mesh_name: Some(buzz_mesh_name(state)),
         trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
-        return Err("mesh node changed while starting Buzz shared compute client".to_string());
+    if let Some(existing) = runtime.as_ref() {
+        // Another GUI agent may have won the startup race while this caller
+        // was resolving membership. The runtime is machine-scoped, not
+        // agent-scoped: join its selected endpoint into the existing node and
+        // let every caller reuse the same local ingress.
+        existing
+            .dial_endpoint_addr(join_token)
+            .await
+            .map_err(|error| format!("mesh dial failed: {error}"))?;
+        return existing.status().await.map_err(|error| error.to_string());
     }
     let started = mesh_llm::DesktopMeshRuntime::start(start)
         .await
@@ -845,9 +855,11 @@ mod tests {
     #[test]
     fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
         let first = buzz_mesh_name_for_relay("WSS://EXAMPLE.COM/");
-        let second = buzz_mesh_name_for_relay("wss://example.com");
+        let second = buzz_mesh_name_for_relay("wss://example.com:443/some/path?ignored=yes");
+        let other_relay = buzz_mesh_name_for_relay("wss://other.example.com");
 
         assert_eq!(first, second);
+        assert_ne!(first, other_relay);
         assert!(first.starts_with("buzz-community-"));
         assert!(!first.contains("example"));
     }
@@ -1041,8 +1053,11 @@ mod tests {
                     .build()
                     .expect("build mesh acceptance runtime");
                 runtime.block_on(async {
-                    const HOSTED_MODEL: &str = "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
+                    const DEFAULT_HOSTED_MODEL: &str =
+                        "jc-builds/SmolLM2-135M-Instruct-Q4_K_M-GGUF:Q4_K_M";
                     const OTHER_MODEL: &str = "some/other-model-not-hosted-locally:Q4_K_M";
+                    let hosted_model = std::env::var("BUZZ_MESH_TEST_MODEL")
+                        .unwrap_or_else(|_| DEFAULT_HOSTED_MODEL.to_string());
 
                     let state = build_app_state();
 
@@ -1051,7 +1066,7 @@ mod tests {
                     let serve =
                         mesh_llm::DesktopMeshRuntime::start(mesh_llm::StartMeshNodeRequest {
                             mode: mesh_llm::MeshNodeMode::Serve,
-                            model_id: Some(HOSTED_MODEL.to_string()),
+                            model_id: Some(hosted_model.clone()),
                             max_vram_gb: None,
                             join_token: None,
                             mesh_name: None,
@@ -1061,7 +1076,10 @@ mod tests {
                         .expect("serve runtime should start");
 
                     let serve_status = serve.status().await.expect("serve status");
-                    let serve_base = serve_status.api_base_url.clone();
+                    let serve_base = serve_status
+                        .api_base_url
+                        .clone()
+                        .expect("serve runtime must expose its local API base");
                     assert_eq!(serve_status.mode, Some(mesh_llm::MeshNodeMode::Serve));
 
                     {
@@ -1069,22 +1087,128 @@ mod tests {
                         *runtime = Some(serve);
                     }
 
-                    // Preflight for a DIFFERENT model with no explicit target. Old code:
-                    // Err(...sharing compute...). New code: reuse the running ingress.
-                    let status = ensure_client_node_for_model(&state, OTHER_MODEL, None)
-                        .await
-                        .expect("serve runtime must not reject a different-model preflight");
+                    // Concurrent GUI agent starts all reuse this one machine-scoped
+                    // runtime. None may create a per-agent client/serve node.
+                    let preflights = tokio::join!(
+                        ensure_client_node_for_model(&state, OTHER_MODEL, None),
+                        ensure_client_node_for_model(&state, OTHER_MODEL, None),
+                        ensure_client_node_for_model(&state, OTHER_MODEL, None),
+                        ensure_client_node_for_model(&state, OTHER_MODEL, None),
+                    );
+                    let statuses = [
+                        preflights.0,
+                        preflights.1,
+                        preflights.2,
+                        preflights.3,
+                    ]
+                    .into_iter()
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("all agent preflights must reuse the serve runtime");
 
                     // It returns the SAME running node — agents keep using A's 9337, and
                     // the router decides routability for OTHER_MODEL per request.
+                    for status in statuses {
+                        assert_eq!(
+                            status.mode,
+                            Some(mesh_llm::MeshNodeMode::Serve),
+                            "preflight should reuse the existing serve runtime, not spin up a client"
+                        );
+                        assert_eq!(
+                            status.api_base_url.as_deref(),
+                            Some(serve_base.as_str()),
+                            "every agent must be pointed at the machine's existing ingress"
+                        );
+                    }
+
+                    // A standalone Share Compute runtime must advertise exactly
+                    // one physical model and serve inference through `auto`.
+                    let http = reqwest::Client::new();
+                    let catalog_deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+                    let catalog = loop {
+                        let body = http
+                            .get(format!("{serve_base}/models"))
+                            .send()
+                            .await
+                            .expect("query single-node catalog")
+                            .error_for_status()
+                            .expect("single-node catalog status")
+                            .json::<serde_json::Value>()
+                            .await
+                            .expect("parse single-node catalog");
+                        let physical_count = body["data"]
+                            .as_array()
+                            .map(|models| {
+                                models
+                                    .iter()
+                                    .filter_map(|model| model["id"].as_str())
+                                    .filter(|model| *model != "mesh")
+                                    .count()
+                            })
+                            .unwrap_or_default();
+                        if physical_count > 0 {
+                            break body;
+                        }
+                        assert!(
+                            tokio::time::Instant::now() < catalog_deadline,
+                            "single Share Compute model never became ready: {body}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    };
+                    let physical_models = catalog["data"]
+                        .as_array()
+                        .expect("catalog data")
+                        .iter()
+                        .filter_map(|model| model["id"].as_str())
+                        .filter(|model| *model != "mesh")
+                        .collect::<Vec<_>>();
                     assert_eq!(
-                        status.mode,
-                        Some(mesh_llm::MeshNodeMode::Serve),
-                        "preflight should reuse the existing serve runtime, not spin up a client"
+                        physical_models.len(),
+                        1,
+                        "single Share Compute node must advertise one physical model: {catalog}"
                     );
-                    assert_eq!(
-                        status.api_base_url, serve_base,
-                        "agent must be pointed at the existing serve node's ingress"
+                    assert!(
+                        physical_models[0].contains(hosted_model.split(':').next().unwrap_or("")),
+                        "catalog must contain the hosted model: {catalog}"
+                    );
+
+                    let inference_deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(120);
+                    let inference = loop {
+                        let response = http
+                            .post(format!("{serve_base}/chat/completions"))
+                            .json(&serde_json::json!({
+                                "model": "auto",
+                                "messages": [{
+                                    "role": "user",
+                                    "content": "Reply with exactly BUZZ_SINGLE_SHARE_OK and nothing else."
+                                }],
+                                "max_tokens": 512,
+                                "temperature": 0
+                            }))
+                            .send()
+                            .await
+                            .expect("single-node auto inference");
+                        if response.status().is_success() {
+                            break response
+                                .json::<serde_json::Value>()
+                                .await
+                                .expect("parse single-node inference");
+                        }
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        assert!(
+                            tokio::time::Instant::now() < inference_deadline,
+                            "single-node auto inference never became ready: HTTP {status}: {body}"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    };
+                    let answer = inference["choices"][0]["message"]["content"]
+                        .as_str()
+                        .unwrap_or_default();
+                    assert!(
+                        !answer.trim().is_empty(),
+                        "single-node auto must produce visible output: {inference}"
                     );
 
                     // Clean up the runtime.
