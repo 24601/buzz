@@ -21,6 +21,7 @@ mod agent_usage;
 mod metric_store;
 mod pipeline;
 pub mod store;
+mod store_migrations;
 
 use pipeline::{commit_archive, plan_archive, query_buckets};
 

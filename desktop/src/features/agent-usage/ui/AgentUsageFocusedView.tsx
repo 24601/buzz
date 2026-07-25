@@ -14,6 +14,7 @@ import { Skeleton } from "@/shared/ui/skeleton";
 import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { useAgentUsageSeries } from "../hooks";
 import {
+  formatCoverageDate,
   formatEstimatedCostUsd,
   formatTokenCountCompact,
   formatTokenCountExact,
@@ -329,14 +330,6 @@ function UsageStat({
       {isPartial ? <Badge variant="outline">Partial</Badge> : null}
     </div>
   );
-}
-
-function formatCoverageDate(unixSeconds: number | null): string {
-  if (unixSeconds === null) return "unknown";
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
 }
 
 /**

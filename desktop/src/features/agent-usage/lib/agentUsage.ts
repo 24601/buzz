@@ -165,6 +165,15 @@ export function formatEstimatedCostUsd(value: number): string {
   }).format(value);
 }
 
+/** Short coverage-date display, e.g. `1737849600` -> "Jan 25". `null` renders "unknown". */
+export function formatCoverageDate(unixSeconds: number | null): string {
+  if (unixSeconds === null) return "unknown";
+  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 /**
  * Bigint-safe ratio in `[0, 1]` for a relative bar, e.g. `part` tokens against
  * `whole` tokens. Never converts the full magnitude through `Number(...)`;

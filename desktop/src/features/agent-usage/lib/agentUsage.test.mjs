@@ -5,6 +5,7 @@ import {
   bigintRatio,
   buildLocalDayBoundaries,
   deriveUsageIngressTrailing,
+  formatCoverageDate,
   formatEstimatedCostUsd,
   formatTokenCountCompact,
   formatTokenCountExact,
@@ -298,6 +299,21 @@ test("formatTokenCountExact renders full grouped digits, never abbreviated", () 
 test("formatEstimatedCostUsd renders two-decimal USD currency", () => {
   assert.equal(formatEstimatedCostUsd(1.5), "$1.50");
   assert.equal(formatEstimatedCostUsd(0), "$0.00");
+});
+
+// ── formatCoverageDate ───────────────────────────────────────────────────────
+
+test("formatCoverageDate renders unknown for a missing timestamp", () => {
+  assert.equal(formatCoverageDate(null), "unknown");
+});
+
+test("formatCoverageDate renders a timestamp as its local month and day without a year", () => {
+  const unixSeconds = 1_737_849_600; // 2025-01-26T00:00:00Z
+  const localDate = new Date(unixSeconds * 1000);
+  const formatted = formatCoverageDate(unixSeconds);
+
+  assert.match(formatted, new RegExp(`\\b${localDate.getDate()}\\b`));
+  assert.doesNotMatch(formatted, new RegExp(`${localDate.getFullYear()}`));
 });
 
 // ── bigintRatio ──────────────────────────────────────────────────────────────

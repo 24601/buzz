@@ -21,6 +21,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/shared/ui/tabs";
 import { useAgentUsageSeries } from "../hooks";
 import {
   bigintRatio,
+  formatCoverageDate,
   formatTokenCountCompact,
   isPartialField,
   isUnknownField,
@@ -243,14 +244,6 @@ function AgentUsageCard({
       )}
     </Card>
   );
-}
-
-function formatCoverageDate(unixSeconds: number | null): string {
-  if (unixSeconds === null) return "unknown";
-  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-  });
 }
 
 function AgentUsageRow({
