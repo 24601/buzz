@@ -125,6 +125,7 @@ pub struct SeriesBucket {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsage {
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub usage: ReportedUsage,
     pub report_count: i64,
@@ -456,6 +457,32 @@ fn assign_bucket_index(boundaries: &[i64], t: i64) -> Option<usize> {
     (0..boundaries.len().saturating_sub(1)).find(|&i| t >= boundaries[i] && t < boundaries[i + 1])
 }
 
+// ── Sort helpers ─────────────────────────────────────────────────────────────
+
+/// Compare two known-total values for the A2 ranking rule: known totals rank
+/// before unknown totals (None); within known totals, descending; within
+/// unknown totals, equal (callers chain further tiebreaks).
+fn cmp_known_total(a: Option<u64>, b: Option<u64>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(av), Some(bv)) => bv.cmp(&av), // descending
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+/// Ordinal (byte-order) comparison of two optional strings, with `None`
+/// sorting after any `Some` value — used as a stable tiebreak for harness and
+/// model names so ordering is locale-independent and matches the Rust backend.
+fn cmp_option_str_none_last(a: &Option<String>, b: &Option<String>) -> std::cmp::Ordering {
+    match (a, b) {
+        (Some(av), Some(bv)) => av.cmp(bv),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 // ── compute_series ───────────────────────────────────────────────────────────
 
 /// Per-agent accumulation scope, built while walking `window_rows` once.
@@ -464,7 +491,8 @@ struct AgentScope {
     bucket_counts: Vec<i64>,
     total: UsageAccumulator,
     report_count: i64,
-    models: HashMap<Option<String>, (UsageAccumulator, i64)>,
+    /// Keyed by `(harness, model)` — same model via two harnesses → two rows.
+    models: HashMap<(Option<String>, Option<String>), (UsageAccumulator, i64)>,
 }
 
 /// Compute the full [`AgentUsageSeries`] from already-loaded rows.
@@ -551,7 +579,7 @@ pub(super) fn compute_series(
 
         let model_entry = scope
             .models
-            .entry(row.model.clone())
+            .entry((row.harness.clone(), row.model.clone()))
             .or_insert_with(|| (UsageAccumulator::default(), 0i64));
         model_entry.0.add(&outcome);
         model_entry.1 += 1;
@@ -602,31 +630,43 @@ pub(super) fn compute_series(
                 })
                 .collect();
 
-            let mut model_rows: Vec<(Option<u64>, Option<String>, ModelUsage)> = scope
+            // Named sort key so the 4-tuple doesn't exceed clippy's type_complexity
+            // threshold and the ordering intent reads at a glance.
+            struct ModelSortKey {
+                total: Option<u64>,
+                harness: Option<String>,
+                model: Option<String>,
+                usage: ModelUsage,
+            }
+            let mut model_rows: Vec<ModelSortKey> = scope
                 .models
                 .into_iter()
-                .map(|(model, (acc, count))| {
-                    let model_total = acc.total_tokens_value();
+                .map(|((harness, model), (acc, count))| {
+                    let total = acc.total_tokens_value();
                     let has_unknown_usage = acc.has_unknown();
-                    (
-                        model_total,
-                        model.clone(),
-                        ModelUsage {
+                    ModelSortKey {
+                        total,
+                        harness: harness.clone(),
+                        model: model.clone(),
+                        usage: ModelUsage {
+                            harness,
                             model,
                             usage: acc.finish(),
                             report_count: count,
                             has_unknown_usage,
                         },
-                    )
+                    }
                 })
                 .collect();
-            model_rows.sort_by(|a, b| match (a.0, b.0) {
-                (Some(av), Some(bv)) => bv.cmp(&av).then_with(|| a.1.cmp(&b.1)),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.1.cmp(&b.1),
+            // A2 ranking: known totalTokens descending, unknown-total after;
+            // tiebreak: harness ascending (None last), then model ascending
+            // (None last), for deterministic ordering.
+            model_rows.sort_by(|a, b| {
+                cmp_known_total(a.total, b.total)
+                    .then_with(|| cmp_option_str_none_last(&a.harness, &b.harness))
+                    .then_with(|| cmp_option_str_none_last(&a.model, &b.model))
             });
-            let models = model_rows.into_iter().map(|(_, _, m)| m).collect();
+            let models = model_rows.into_iter().map(|k| k.usage).collect();
 
             (
                 total_tokens_value,
@@ -642,12 +682,7 @@ pub(super) fn compute_series(
             )
         })
         .collect();
-    agent_rows.sort_by(|a, b| match (a.0, b.0) {
-        (Some(av), Some(bv)) => bv.cmp(&av).then_with(|| a.1.cmp(&b.1)),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a.1.cmp(&b.1),
-    });
+    agent_rows.sort_by(|a, b| cmp_known_total(a.0, b.0).then_with(|| a.1.cmp(&b.1)));
     let any_agent_unknown = agent_rows.iter().any(|(_, _, a)| a.has_unknown_usage);
     let agents: Vec<AgentUsage> = agent_rows.into_iter().map(|(_, _, a)| a).collect();
 

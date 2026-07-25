@@ -82,6 +82,11 @@ const overrides = new Map([
   // command's SQLite core end to end. Test-only content; ratcheted
   // 1208 -> 1424.
   ["src-tauri/src/archive/mod_tests.rs", 1424],
+  // agent-usage-harness: M1 migration (atomic transaction wrapper, PRAGMA
+  // guard, canonical-store worklist) + rebuild_metric_index_in_tx helper
+  // + apply_schema_migrations + store_migration_tests.rs #[path] include.
+  // Load-bearing correctness fix (Thufir IMPORTANT). M1 tests split out.
+  ["src-tauri/src/archive/store.rs", 1044],
   // unified-agent-model 1A.1: profile reconcile split to agents_profile.rs,
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
