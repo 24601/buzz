@@ -143,59 +143,10 @@ pub async fn save_custom_harness(
     std::fs::create_dir_all(&custom_dir)
         .map_err(|e| format!("failed to create custom_harnesses dir: {e}"))?;
 
-    let target_path = custom_dir.join(format!("{}.json", definition.id));
-
-    // ── Phase 2: atomic write (Windows-safe) ────────────────────────────────
-    // `atomic-write-file` 0.3 uses a plain `fs::rename(temp, dest)` on
-    // non-Unix platforms.  On Windows `fs::rename` fails with "access denied"
-    // when `dest` already exists.  Pre-removing the target on Windows before
-    // committing makes same-ID edits safe; the window between remove and rename
-    // is tiny and the user-visible TOML data is already serialised in the temp
-    // file at that point.
-    let json = serde_json::to_string_pretty(&definition)
-        .map_err(|e| format!("failed to serialize harness definition: {e}"))?;
-
-    {
-        use atomic_write_file::AtomicWriteFile;
-        let mut file = AtomicWriteFile::open(&target_path)
-            .map_err(|e| format!("failed to open {}: {e}", target_path.display()))?;
-        std::io::Write::write_all(&mut file, json.as_bytes())
-            .map_err(|e| format!("failed to write harness definition: {e}"))?;
-        // On Windows, remove the destination before committing so `fs::rename`
-        // does not fail with "access denied" on an existing file.
-        #[cfg(windows)]
-        if target_path.exists() {
-            std::fs::remove_file(&target_path).map_err(|e| {
-                format!(
-                    "failed to remove existing {} before replace: {e}",
-                    target_path.display()
-                )
-            })?;
-        }
-        file.commit()
-            .map_err(|e| format!("failed to finalize harness definition: {e}"))?;
-    }
-
-    // ── Phase 3: remove old file on rename (after new file is committed) ────
-    if let Some(ref old_id) = rename_old_id {
-        let old_path = custom_dir.join(format!("{old_id}.json"));
-        if let Err(e) = std::fs::remove_file(&old_path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                // New file is already committed.  Surface the error so the user
-                // knows the old file was not cleaned up, but do not abort — the
-                // new definition is already live and the registry re-warm below
-                // will make the new id resolvable.
-                tracing::warn!(
-                    "save_custom_harness: failed to remove old harness file {old_id:?}: {e}"
-                );
-            }
-        }
-    }
-
-    // Refresh the loaded-harness registry transactionally so a spawn/start
-    // immediately after save can resolve the new id without waiting for the
-    // next frontend-driven discover_acp_providers call.
-    custom_harnesses::warm_harness_registry_from_dir(Some(&custom_dir));
+    // ── Phase 2+3: backup-swap write + rename (Windows-safe, rollback on failure)
+    // `save_and_warm` holds the persist mutex for the write + registry-warm pair
+    // so concurrent saves never produce a stale registry snapshot (B-6).
+    custom_harnesses::save_and_warm(&custom_dir, &definition, rename_old_id.as_deref())?;
 
     // Resolve availability for the returned catalog entry.
     let (availability, command_opt, binary_path) =
@@ -264,20 +215,9 @@ pub async fn delete_custom_harness(id: String, app: tauri::AppHandle) -> Result<
         .map_err(|e| format!("failed to resolve app data dir: {e}"))?
         .join("custom_harnesses");
 
-    let target_path = custom_dir.join(format!("{id}.json"));
-
-    match std::fs::remove_file(&target_path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Idempotent: already gone is fine.
-        }
-        Err(e) => return Err(format!("failed to delete harness {id:?}: {e}")),
-    }
-
-    // Refresh the loaded-harness registry transactionally so the deleted id
-    // is immediately unresolvable, without waiting for the next frontend
-    // discover_acp_providers call.
-    custom_harnesses::warm_harness_registry_from_dir(Some(&custom_dir));
+    // `delete_and_warm` holds the persist mutex for the delete + registry-warm
+    // pair so concurrent save/delete calls never produce a stale snapshot (B-6).
+    custom_harnesses::delete_and_warm(&custom_dir, &id)?;
 
     Ok(())
 }

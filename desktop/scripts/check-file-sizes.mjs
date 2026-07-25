@@ -338,6 +338,14 @@ const overrides = new Map([
   // helper + discover_acp_runtime_availability; both load-bearing for
   // post-install verification. Semantic composition with BYOH changes.
   ["src-tauri/src/managed_agents/discovery.rs", 1706],
+  // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
+  // delete_and_warm (persist-mutex serialization for concurrent-safe registry
+  // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
+  // B-4 real persistence tests (create, same-id edit, rename, backup cleanup) +
+  // B-3 env validation boundary tests (malformed key, reserved shape, NUL,
+  // size limit, ownership marker). Load-bearing correctness/security coverage;
+  // queued to extract helper module once the feature stabilizes.
+  ["src-tauri/src/managed_agents/custom_harnesses.rs", 1045],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.

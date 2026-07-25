@@ -286,6 +286,155 @@ pub(crate) fn warm_harness_registry_from_dir(custom_dir: Option<&std::path::Path
     update_loaded_harness_registry(all);
 }
 
+/// Global mutex that serializes save/delete filesystem mutations and the
+/// subsequent registry warm as a single atomic unit.
+///
+/// Without this lock, two concurrent `save_custom_harness` calls could
+/// interleave: A writes file-A, B writes file-B, B re-warms (sees only B),
+/// A re-warms (sees A + B, wins) — but if timing goes the other way B's warm
+/// wins and misses A. Holding the lock for the write+warm pair guarantees that
+/// the registry always reflects the complete set of files on disk at the time
+/// of the warm.
+fn persist_mutex() -> &'static std::sync::Mutex<()> {
+    use std::sync::{Mutex, OnceLock};
+    static PERSIST: OnceLock<Mutex<()>> = OnceLock::new();
+    PERSIST.get_or_init(|| Mutex::new(()))
+}
+
+/// Write `definition` to `dir`, then atomically warm the loaded-harness
+/// registry.  Callers MUST use this function (not `save_custom_harness_to_dir`
+/// or `warm_harness_registry_from_dir` separately) so that concurrent saves
+/// cannot produce a stale registry snapshot.
+pub(crate) fn save_and_warm(
+    dir: &Path,
+    definition: &HarnessDefinition,
+    rename_old_id: Option<&str>,
+) -> Result<SaveOutcome, String> {
+    let _guard = persist_mutex().lock().unwrap_or_else(|e| e.into_inner());
+    let outcome = save_custom_harness_to_dir(dir, definition, rename_old_id)?;
+    warm_harness_registry_from_dir(Some(dir));
+    Ok(outcome)
+}
+
+/// Delete `id.json` from `dir`, then atomically warm the loaded-harness
+/// registry.  Callers MUST use this function (not `fs::remove_file` +
+/// `warm_harness_registry_from_dir` separately) for the same reason as
+/// `save_and_warm`.
+pub(crate) fn delete_and_warm(dir: &Path, id: &str) -> Result<(), String> {
+    let _guard = persist_mutex().lock().unwrap_or_else(|e| e.into_inner());
+    let target = dir.join(format!("{id}.json"));
+    match std::fs::remove_file(&target) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("failed to delete harness {id:?}: {e}")),
+    }
+    warm_harness_registry_from_dir(Some(dir));
+    Ok(())
+}
+
+/// The outcome of a successful [`save_custom_harness_to_dir`] call.
+#[allow(dead_code)] // Fields consumed by tests; production callers use the Result shape.
+pub(crate) struct SaveOutcome {
+    /// The path of the newly written harness file.
+    pub target_path: std::path::PathBuf,
+    /// The path of the old file that was removed on a rename, if any.
+    /// `None` when the id was unchanged or this was a new harness.
+    pub removed_old_path: Option<std::path::PathBuf>,
+}
+
+/// Write a harness definition to `dir/<id>.json` using a backup-swap strategy
+/// that is safe on all platforms (including Windows where `fs::rename` over an
+/// existing file fails with "access denied"):
+///
+/// 1. Serialize the definition and write it to a unique temp file via
+///    `atomic_write_file`.
+/// 2. If the target already exists, rename it to `<target>.bak` (the backup).
+/// 3. `commit()` the temp file (renames temp → target).
+///    * On success: delete `.bak` (best-effort; a stale `.bak` is harmless).
+///    * On failure: restore `.bak` → target so the original is never lost.
+/// 4. If `rename_old_id` is `Some`, remove `<dir>/<old_id>.json` after the
+///    new file is committed (non-fatal if NotFound).
+///
+/// The caller is responsible for full validation (id, env, etc.) BEFORE
+/// calling this function — no validation is performed here.
+pub(crate) fn save_custom_harness_to_dir(
+    dir: &Path,
+    definition: &HarnessDefinition,
+    rename_old_id: Option<&str>,
+) -> Result<SaveOutcome, String> {
+    use atomic_write_file::AtomicWriteFile;
+    use std::io::Write;
+
+    let json = serde_json::to_string_pretty(definition)
+        .map_err(|e| format!("failed to serialize harness definition: {e}"))?;
+
+    let target_path = dir.join(format!("{}.json", definition.id));
+    let bak_path = dir.join(format!("{}.json.bak", definition.id));
+
+    // Stage write to temp file.
+    let mut file = AtomicWriteFile::open(&target_path)
+        .map_err(|e| format!("failed to open {}: {e}", target_path.display()))?;
+    file.write_all(json.as_bytes())
+        .map_err(|e| format!("failed to write harness definition: {e}"))?;
+
+    // Back up the existing target before committing so we can restore on failure.
+    let had_backup = if target_path.exists() {
+        std::fs::rename(&target_path, &bak_path).map_err(|e| {
+            format!(
+                "failed to back up {} before replace: {e}",
+                target_path.display()
+            )
+        })?;
+        true
+    } else {
+        false
+    };
+
+    // Commit temp → target.  If commit fails and we made a backup, restore it.
+    if let Err(e) = file.commit() {
+        if had_backup {
+            if let Err(restore_err) = std::fs::rename(&bak_path, &target_path) {
+                // Both commit and restore failed — surface both so the user
+                // can recover manually.
+                return Err(format!(
+                    "failed to finalize harness definition: {e}; \
+                     also failed to restore backup: {restore_err} \
+                     (original may be at {})",
+                    bak_path.display()
+                ));
+            }
+        }
+        return Err(format!("failed to finalize harness definition: {e}"));
+    }
+
+    // Commit succeeded — remove the backup (best-effort; stale .bak is harmless).
+    if had_backup {
+        let _ = std::fs::remove_file(&bak_path);
+    }
+
+    // Remove old file on id rename, after the new file is committed.
+    let mut removed_old_path = None;
+    if let Some(old_id) = rename_old_id {
+        let old_path = dir.join(format!("{old_id}.json"));
+        match std::fs::remove_file(&old_path) {
+            Ok(()) => removed_old_path = Some(old_path),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                // New file is already committed — log and continue so the
+                // registry re-warm picks up the new id.
+                tracing::warn!(
+                    "save_custom_harness_to_dir: failed to remove old harness {old_id:?}: {e}"
+                );
+            }
+        }
+    }
+
+    Ok(SaveOutcome {
+        target_path,
+        removed_old_path,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -495,68 +644,280 @@ mod tests {
         assert!(check_id_collision("custom-goose").is_ok());
     }
 
-    // ── Round-trip: save → load → delete → load ──────────────────────────────
+    // ── Round-trip via save_custom_harness_to_dir (B-4) ─────────────────────
+    //
+    // These tests exercise the REAL persistence helper, not raw fs::write.
+    // They prove: create, same-ID edit (backup-swap), rename (old file removed),
+    // backup file cleaned up on success.
+
+    fn make_def(id: &str, label: &str) -> HarnessDefinition {
+        HarnessDefinition {
+            id: id.to_string(),
+            label: label.to_string(),
+            command: format!("{id}-bin"),
+            args: vec![],
+            env: BTreeMap::new(),
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        }
+    }
 
     #[test]
-    fn round_trip_save_then_load_then_delete() {
+    fn save_to_dir_create_writes_file_and_loads_back() {
         let dir = tempfile::tempdir().unwrap();
-        let mut env_map = BTreeMap::new();
-        env_map.insert("MY_KEY".to_string(), "my_value".to_string());
-        let def = HarnessDefinition {
-            id: "my-rt".to_string(),
-            label: "My Runtime".to_string(),
-            command: "my-rt-bin".to_string(),
-            args: vec!["--flag".to_string()],
-            env: env_map,
-            install_instructions_url: "https://example.com".to_string(),
-            install_hint: "Install from example.com".to_string(),
-        };
+        let def = make_def("my-harness", "My Harness");
 
-        // Serialize and write (simulating save_custom_harness logic).
-        let json = serde_json::to_string_pretty(&def).unwrap();
-        let target = dir.path().join(format!("{}.json", def.id));
-        fs::write(&target, &json).unwrap();
+        let outcome = save_custom_harness_to_dir(dir.path(), &def, None).unwrap();
 
-        // Load should return exactly one entry.
+        assert_eq!(outcome.target_path, dir.path().join("my-harness.json"));
+        assert!(outcome.removed_old_path.is_none(), "no old file on create");
+
         let loaded = load_custom_harnesses(dir.path());
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].id, "my-rt");
-        assert_eq!(loaded[0].command, "my-rt-bin");
-        assert_eq!(loaded[0].args, vec!["--flag"]);
-        assert_eq!(
-            loaded[0].env.get("MY_KEY").map(String::as_str),
-            Some("my_value")
-        );
+        assert_eq!(loaded[0].id, "my-harness");
+        assert_eq!(loaded[0].label, "My Harness");
+    }
 
-        // Delete the file (simulating delete_custom_harness).
-        fs::remove_file(&target).unwrap();
+    #[test]
+    fn save_to_dir_same_id_edit_replaces_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = make_def("my-harness", "V1 Label");
+        save_custom_harness_to_dir(dir.path(), &v1, None).unwrap();
 
-        // Load should now return an empty list.
-        let after_delete = load_custom_harnesses(dir.path());
+        // Same-ID edit: label changes.
+        let v2 = make_def("my-harness", "V2 Label");
+        let outcome = save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
+
+        // No old-path reported (id unchanged).
+        assert!(outcome.removed_old_path.is_none());
+
+        let loaded = load_custom_harnesses(dir.path());
+        assert_eq!(loaded.len(), 1, "same-id edit must not duplicate entries");
+        assert_eq!(loaded[0].label, "V2 Label", "v2 content must be present");
+    }
+
+    #[test]
+    fn save_to_dir_backup_is_cleaned_up_after_same_id_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let v1 = make_def("my-harness", "V1");
+        save_custom_harness_to_dir(dir.path(), &v1, None).unwrap();
+
+        let v2 = make_def("my-harness", "V2");
+        save_custom_harness_to_dir(dir.path(), &v2, None).unwrap();
+
+        // .bak file must be gone after a successful commit.
+        let bak = dir.path().join("my-harness.json.bak");
         assert!(
-            after_delete.is_empty(),
-            "directory should be empty after delete"
+            !bak.exists(),
+            ".bak file must be removed after successful same-id edit"
         );
     }
 
     #[test]
-    fn round_trip_overwrite_existing_definition() {
+    fn save_to_dir_rename_removes_old_file_and_creates_new() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("rt.json");
+        let old_def = make_def("old-id", "Old");
+        save_custom_harness_to_dir(dir.path(), &old_def, None).unwrap();
 
-        // Write v1.
-        fs::write(&path, r#"{"id":"rt","label":"V1","command":"rt-bin"}"#).unwrap();
+        // Rename: new id, old_id supplied.
+        let new_def = make_def("new-id", "New");
+        let outcome = save_custom_harness_to_dir(dir.path(), &new_def, Some("old-id")).unwrap();
 
-        let v1 = load_custom_harnesses(dir.path());
-        assert_eq!(v1[0].label, "V1");
+        // The outcome carries the old path that was removed.
+        let expected_old = dir.path().join("old-id.json");
+        assert_eq!(
+            outcome.removed_old_path,
+            Some(expected_old.clone()),
+            "removed_old_path must be the old file"
+        );
 
-        // Overwrite with v2 (simulates save on an existing definition).
-        fs::write(&path, r#"{"id":"rt","label":"V2","command":"rt-bin-v2"}"#).unwrap();
+        // Old file gone, new file present.
+        assert!(!expected_old.exists(), "old-id.json must be removed");
+        let loaded = load_custom_harnesses(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, "new-id");
+    }
 
-        let v2 = load_custom_harnesses(dir.path());
-        assert_eq!(v2.len(), 1, "overwrite must not duplicate entries");
-        assert_eq!(v2[0].label, "V2");
-        assert_eq!(v2[0].command, "rt-bin-v2");
+    #[test]
+    fn save_to_dir_rename_nonexistent_old_id_is_non_fatal() {
+        // rename_old_id pointing to a file that does not exist must succeed
+        // (NotFound is silently ignored by the helper).
+        let dir = tempfile::tempdir().unwrap();
+        let def = make_def("alpha", "Alpha");
+        let outcome = save_custom_harness_to_dir(dir.path(), &def, Some("ghost-id")).unwrap();
+
+        // New file created, no old path removed.
+        assert_eq!(outcome.target_path, dir.path().join("alpha.json"));
+        assert!(
+            outcome.removed_old_path.is_none(),
+            "NotFound old-id must not be reported as removed"
+        );
+        assert!(load_custom_harnesses(dir.path()).len() == 1);
+    }
+
+    #[test]
+    fn save_to_dir_roundtrip_with_env_preserves_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("MY_KEY".to_string(), "my_value".to_string());
+        let def = HarnessDefinition {
+            id: "env-harness".to_string(),
+            label: "Env Harness".to_string(),
+            command: "env-bin".to_string(),
+            args: vec!["--flag".to_string()],
+            env,
+            install_instructions_url: "https://example.com".to_string(),
+            install_hint: "Install from example.com".to_string(),
+        };
+
+        save_custom_harness_to_dir(dir.path(), &def, None).unwrap();
+
+        let loaded = load_custom_harnesses(dir.path());
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].args, vec!["--flag"]);
+        assert_eq!(
+            loaded[0].env.get("MY_KEY").map(String::as_str),
+            Some("my_value"),
+            "env must round-trip through save_custom_harness_to_dir"
+        );
+    }
+
+    // ── B-3: env validation boundary (validate_harness_definition_pub integration) ──
+
+    #[test]
+    fn validate_rejects_malformed_key_with_equals_sign() {
+        // BUZZ_AUTH_TAG=x is the documented reserved-key bypass shape:
+        // the key contains '=' so Command::env would produce
+        // `BUZZ_AUTH_TAG=x=forged` in the child env.
+        let mut env = BTreeMap::new();
+        env.insert("BUZZ_AUTH_TAG=x".to_string(), "forged".to_string());
+        let def = HarnessDefinition {
+            id: "bad-env".to_string(),
+            label: "Bad".to_string(),
+            command: "bad-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        let err = validate_harness_definition_pub(&def).unwrap_err();
+        assert!(
+            err.contains("env var keys must match"),
+            "malformed key must be rejected: {err}"
+        );
+        assert!(
+            err.contains("BUZZ_AUTH_TAG"),
+            "error must name the offending key: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_reserved_key_buzz_managed_agent() {
+        // BUZZ_MANAGED_AGENT and BUZZ_MANAGED_AGENT_START_NONCE are the
+        // ownership markers — supplying them in a definition must be rejected.
+        let mut env = BTreeMap::new();
+        env.insert(
+            "BUZZ_MANAGED_AGENT".to_string(),
+            "fake-instance".to_string(),
+        );
+        let def = HarnessDefinition {
+            id: "bad-marker".to_string(),
+            label: "Bad".to_string(),
+            command: "bad-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        let err = validate_harness_definition_pub(&def).unwrap_err();
+        assert!(
+            err.contains("reserved by Buzz"),
+            "ownership marker key must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_reserved_key_case_insensitive() {
+        // BUZZ_PRIVATE_KEY in any casing must be blocked.
+        let mut env = BTreeMap::new();
+        env.insert("buzz_private_key".to_string(), "secret".to_string());
+        let def = HarnessDefinition {
+            id: "ci-marker".to_string(),
+            label: "CI".to_string(),
+            command: "ci-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        let err = validate_harness_definition_pub(&def).unwrap_err();
+        assert!(
+            err.contains("reserved by Buzz"),
+            "reserved key must be blocked case-insensitively: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_nul_byte_in_value() {
+        // A NUL in a value would cause Command::env to panic at spawn time.
+        let mut env = BTreeMap::new();
+        env.insert("MY_KEY".to_string(), "val\x00ue".to_string());
+        let def = HarnessDefinition {
+            id: "nul-val".to_string(),
+            label: "NUL".to_string(),
+            command: "nul-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        let err = validate_harness_definition_pub(&def).unwrap_err();
+        assert!(
+            err.contains("NUL bytes"),
+            "NUL value must be rejected at validation: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_value_over_per_value_size_limit() {
+        use crate::managed_agents::env_vars::MAX_ENV_VALUE_BYTES;
+        let mut env = BTreeMap::new();
+        // One byte over the per-value cap.
+        env.insert("BIG_VAL".to_string(), "x".repeat(MAX_ENV_VALUE_BYTES + 1));
+        let def = HarnessDefinition {
+            id: "big-val".to_string(),
+            label: "Big".to_string(),
+            command: "big-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        let err = validate_harness_definition_pub(&def).unwrap_err();
+        assert!(
+            err.contains("per-value limit"),
+            "oversized value must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_well_formed_env() {
+        let mut env = BTreeMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "sk-test-123".to_string());
+        env.insert("MODEL_VERSION".to_string(), "claude-3".to_string());
+        let def = HarnessDefinition {
+            id: "good-env".to_string(),
+            label: "Good".to_string(),
+            command: "good-bin".to_string(),
+            args: vec![],
+            env,
+            install_instructions_url: String::new(),
+            install_hint: String::new(),
+        };
+        assert!(
+            validate_harness_definition_pub(&def).is_ok(),
+            "well-formed definition must pass validation"
+        );
     }
 
     // ── Registry warm path ───────────────────────────────────────────────────
