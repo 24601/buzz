@@ -1025,6 +1025,8 @@ declare global {
     }>;
     /** Project event kinds rejected once, in order, to exercise retry flows. */
     __BUZZ_E2E_REJECT_PROJECT_EVENT_KINDS__?: number[];
+    /** Makes the mock relay reject project announcements as an unknown kind. */
+    __BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__?: boolean;
     /** Project event kinds accepted once but reported as failed to test lost acknowledgements. */
     __BUZZ_E2E_FAIL_PROJECT_EVENT_ACK_KINDS__?: number[];
     /** Structured merge error returned by the mock native merge command. */
@@ -8941,6 +8943,18 @@ function sendToMockSocket(args: {
           event.id,
           false,
           "invalid: event pubkey does not match authenticated identity",
+        ]);
+        return;
+      }
+      if (
+        event.kind === KIND_PROJECT_ANNOUNCEMENT &&
+        window.__BUZZ_E2E_UNSUPPORTED_PROJECT_ANNOUNCEMENTS__
+      ) {
+        sendWsText(socket.handler, [
+          "OK",
+          event.id,
+          false,
+          "restricted: unknown event kind",
         ]);
         return;
       }

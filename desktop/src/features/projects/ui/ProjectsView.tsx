@@ -14,6 +14,7 @@ import {
   useProjectsQuery,
   useProjectsWorkItemsQuery,
 } from "@/features/projects/hooks";
+import { useRepositoryActivitySummariesQuery } from "@/features/projects/repositoryActivityHooks";
 import { useCreateProjectMutation } from "@/features/projects/useCreateProject";
 import { selectProjectRepository } from "@/features/projects/projectModels";
 import { useProjectsRepoSnapshotsQuery } from "@/features/projects/useProjectsRepoSnapshots";
@@ -39,7 +40,14 @@ import {
   ProjectsToolbar,
   ProjectsViewModeToggle,
 } from "@/features/projects/ui/ProjectsToolbar";
-import { hasLocalCheckout } from "@/features/projects/lib/projectLocalRepos";
+import {
+  hasLocalCheckout,
+  hasLocalRepositoryCheckout,
+} from "@/features/projects/lib/projectLocalRepos";
+import {
+  RepositoryGridCard,
+  RepositoryListRow,
+} from "@/features/projects/ui/RepositoryCards";
 import {
   getProjectUpdatedAt,
   isProjectMine,
@@ -58,7 +66,6 @@ import {
   readStoredRepositoryScope,
   readStoredSort,
   readStoredViewMode,
-  uniqueRepositories,
   writeStoredFilter,
   writeStoredIssueScope,
   writeStoredPullRequestScope,
@@ -76,6 +83,14 @@ import { Button } from "@/shared/ui/button";
 import { PageHeader } from "@/shared/ui/PageHeader";
 
 const MANY_PROJECTS_THRESHOLD = 12;
+const PROJECT_SCOPE_OPTIONS: Array<{
+  label: string;
+  value: ProjectsRepositoryScope;
+}> = [
+  { label: "All", value: "all" },
+  { label: "My Projects", value: "mine" },
+  { label: "Local", value: "local" },
+];
 const REPOSITORY_SCOPE_OPTIONS: Array<{
   label: string;
   value: ProjectsRepositoryScope;
@@ -154,7 +169,12 @@ export function ProjectsView() {
       : storedFilter;
   });
   const activitySummariesQuery = useProjectActivitySummariesQuery(
-    filter === "prs" || filter === "issues" ? [] : projects,
+    filter === "prs" || filter === "issues" || filter === "repositories"
+      ? []
+      : projects,
+  );
+  const repositoryActivitySummariesQuery = useRepositoryActivitySummariesQuery(
+    filter === "repositories" ? projects : [],
   );
   const [repositoryScope, setRepositoryScope] =
     React.useState<ProjectsRepositoryScope>(() => readStoredRepositoryScope());
@@ -168,10 +188,7 @@ export function ProjectsView() {
   );
   // One blobless clone per unique repository — only scan while the overview
   // header (filter === "all") is actually visible.
-  const snapshotProjects = React.useMemo(
-    () => (filter === "all" ? uniqueRepositories(projects) : []),
-    [filter, projects],
-  );
+  const snapshotProjects = filter === "all" ? projects : [];
   const repoSnapshotsQuery = useProjectsRepoSnapshotsQuery(
     snapshotProjects,
     activeCommunity?.reposDir,
@@ -274,19 +291,8 @@ export function ProjectsView() {
     [localRepositoriesQuery.data],
   );
 
-  // Count projects with a checkout on this machine — matches what the
-  // "Local" filter actually lists, not every directory in the repos folder.
-  const localProjectCount = React.useMemo(
-    () =>
-      projects.filter((project) => hasLocalCheckout(project, localRepoNames))
-        .length,
-    [localRepoNames, projects],
-  );
-
   const visibleProjects = React.useMemo(() => {
-    // The PRs and Issues filters render dedicated lists
-    // (visiblePullRequests / visibleIssues), not project cards.
-    if (filter === "prs" || filter === "issues") {
+    if (filter !== "projects" && filter !== "agents" && filter !== "users") {
       return [];
     }
 
@@ -319,9 +325,7 @@ export function ProjectsView() {
         );
       });
 
-    return filter === "repositories"
-      ? uniqueRepositories(sortedProjects)
-      : sortedProjects;
+    return sortedProjects;
   }, [
     activitySummariesQuery.data,
     currentPubkey,
@@ -329,6 +333,62 @@ export function ProjectsView() {
     localRepoNames,
     profiles,
     projects,
+    repositoryScope,
+    sort,
+  ]);
+
+  const visibleRepositories = React.useMemo(() => {
+    if (filter !== "repositories") return [];
+    const repositories = [
+      ...new Map(
+        projects
+          .flatMap((project) =>
+            project.repositories.map((repository) => ({
+              project,
+              repository,
+            })),
+          )
+          .map((item) => [item.repository.repoAddress, item]),
+      ).values(),
+    ];
+    return repositories
+      .filter(({ repository }) => {
+        if (repositoryScope === "mine") {
+          if (!currentPubkey) return false;
+          const normalizedCurrentPubkey = normalizePubkey(currentPubkey);
+          return (
+            normalizePubkey(repository.owner) === normalizedCurrentPubkey ||
+            repository.contributors.some(
+              (pubkey) => normalizePubkey(pubkey) === normalizedCurrentPubkey,
+            )
+          );
+        }
+        if (repositoryScope === "local") {
+          return hasLocalRepositoryCheckout(repository, localRepoNames);
+        }
+        return true;
+      })
+      .sort((left, right) => {
+        if (sort === "name") {
+          return left.repository.name.localeCompare(right.repository.name);
+        }
+        if (sort === "created") {
+          return right.repository.createdAt - left.repository.createdAt;
+        }
+        const leftUpdatedAt =
+          repositoryActivitySummariesQuery.data?.[left.repository.repoAddress]
+            ?.updatedAt ?? left.repository.createdAt;
+        const rightUpdatedAt =
+          repositoryActivitySummariesQuery.data?.[right.repository.repoAddress]
+            ?.updatedAt ?? right.repository.createdAt;
+        return rightUpdatedAt - leftUpdatedAt;
+      });
+  }, [
+    currentPubkey,
+    filter,
+    localRepoNames,
+    projects,
+    repositoryActivitySummariesQuery.data,
     repositoryScope,
     sort,
   ]);
@@ -383,6 +443,13 @@ export function ProjectsView() {
     [goProject],
   );
 
+  const handleOpenRepository = React.useCallback(
+    (project: Project, repository: Repository) => {
+      void goProject(project.id, { repositoryId: repository.id });
+    },
+    [goProject],
+  );
+
   const handleOpenCommit = React.useCallback(
     (project: Project, commitHash: string) => {
       void goProject(project.id, { commitHash });
@@ -425,6 +492,16 @@ export function ProjectsView() {
     },
     [localRepoNames, openTerminal],
   );
+  const handleOpenRepositoryTerminal = React.useCallback(
+    (repository: Repository) =>
+      openTerminal(repository, {
+        hasLocalCheckout: hasLocalRepositoryCheckout(
+          repository,
+          localRepoNames,
+        ),
+      }),
+    [localRepoNames, openTerminal],
+  );
 
   const handleDeleteProject = React.useCallback(
     async (project: Project) => {
@@ -463,7 +540,7 @@ export function ProjectsView() {
     return <EmptyState />;
   }
 
-  const repositoryItems =
+  const projectItems =
     visibleProjects.length === 0 ? (
       <EmptyFilteredState />
     ) : viewMode === "grid" ? (
@@ -512,6 +589,45 @@ export function ProjectsView() {
             />
           );
         })}
+      </div>
+    );
+
+  const repositoryItems =
+    visibleRepositories.length === 0 ? (
+      <EmptyFilteredState />
+    ) : viewMode === "grid" ? (
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {visibleRepositories.map(({ project, repository }) => (
+          <RepositoryGridCard
+            hasLocal={hasLocalRepositoryCheckout(repository, localRepoNames)}
+            key={repository.repoAddress}
+            onOpen={handleOpenRepository}
+            onOpenTerminal={handleOpenRepositoryTerminal}
+            profiles={profiles}
+            project={project}
+            repository={repository}
+            summary={
+              repositoryActivitySummariesQuery.data?.[repository.repoAddress]
+            }
+          />
+        ))}
+      </div>
+    ) : (
+      <div className={PROJECT_LIST_CONTAINER_CLASS}>
+        {visibleRepositories.map(({ project, repository }) => (
+          <RepositoryListRow
+            hasLocal={hasLocalRepositoryCheckout(repository, localRepoNames)}
+            key={repository.repoAddress}
+            onOpen={handleOpenRepository}
+            onOpenTerminal={handleOpenRepositoryTerminal}
+            profiles={profiles}
+            project={project}
+            repository={repository}
+            summary={
+              repositoryActivitySummariesQuery.data?.[repository.repoAddress]
+            }
+          />
+        ))}
       </div>
     );
 
@@ -614,12 +730,17 @@ export function ProjectsView() {
       <CreateProjectDialog
         isCreating={createProjectMutation.isPending}
         onCreate={async (input) => {
-          const project = await createProjectMutation.mutateAsync(input);
-          toast.success(`Project "${project.name}" created.`);
-          // Land on the list that actually shows the new project — the
-          // Overview only surfaces the top few most-active repositories.
+          const result = await createProjectMutation.mutateAsync(input);
+          if (result.compatibilityWarning) {
+            toast.warning("Created as a standalone project", {
+              description: result.compatibilityWarning,
+            });
+          } else {
+            toast.success(`Project "${result.project.name}" created.`);
+          }
+          // Land on the complete project list after creation.
           handleRepositoryScopeChange("all");
-          handleFilterChange("repositories");
+          handleFilterChange("projects");
         }}
         onOpenChange={setCreateProjectOpen}
         open={createProjectOpen}
@@ -670,7 +791,6 @@ export function ProjectsView() {
             <div className="w-full min-w-0 pb-4 pt-4">
               {filter === "all" ? (
                 <ProjectsOverviewPanel
-                  localRepositoryCount={localProjectCount}
                   metadata={
                     <ProjectsOverviewRail
                       profiles={profiles}
@@ -679,11 +799,6 @@ export function ProjectsView() {
                     />
                   }
                   onSelectSection={(section) => {
-                    if (section === "local") {
-                      handleRepositoryScopeChange("local");
-                      handleFilterChange("repositories");
-                      return;
-                    }
                     handleFilterChange(section);
                   }}
                   projects={projects}
@@ -707,6 +822,13 @@ export function ProjectsView() {
                         onChange={handleIssueScopeChange}
                         options={ISSUE_SCOPE_OPTIONS}
                         value={issueScope}
+                      />
+                    ) : filter === "projects" ? (
+                      <ProjectsListScopeDropdown
+                        label="Filter projects"
+                        onChange={handleRepositoryScopeChange}
+                        options={PROJECT_SCOPE_OPTIONS}
+                        value={repositoryScope}
                       />
                     ) : (
                       <ProjectsListScopeDropdown
@@ -753,6 +875,8 @@ export function ProjectsView() {
                       profiles={profiles}
                       viewMode={viewMode}
                     />
+                  ) : filter === "projects" ? (
+                    projectItems
                   ) : (
                     repositoryItems
                   )}

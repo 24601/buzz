@@ -6,7 +6,10 @@ import {
   type Project,
   projectsQueryKey,
 } from "@/features/projects/hooks";
-import { buildInitialProjectEventTemplates } from "@/features/projects/projectCreation";
+import {
+  buildInitialProjectEventTemplates,
+  isUnsupportedProjectKindError,
+} from "@/features/projects/projectCreation";
 import { buildProjectReadModels } from "@/features/projects/projectModels";
 import { relayClient } from "@/shared/api/relayClient";
 import { getCachedRelayOrigin } from "@/shared/lib/mediaUrl";
@@ -20,11 +23,16 @@ export type CreateProjectInput = {
   webUrl?: string;
 };
 
+export type CreateProjectResult = {
+  project: Project;
+  compatibilityWarning?: string;
+};
+
 /** Publishes a project announcement and its initial NIP-34 repository. */
 async function createProject(
   input: CreateProjectInput,
   resumableProjectIds: Set<string>,
-): Promise<Project> {
+): Promise<CreateProjectResult> {
   const identity = await getIdentity();
   const templates = buildInitialProjectEventTemplates({
     ...input,
@@ -49,7 +57,7 @@ async function createProject(
       )
     ) {
       resumableProjectIds.delete(projectId);
-      return existingProject;
+      return { project: existingProject };
     }
     throw new Error(`You already have a project named "${templates.dtag}".`);
   }
@@ -67,11 +75,31 @@ async function createProject(
     );
   }
 
-  await relayClient.publishEvent(
-    projectEvent,
-    "Timed out creating project.",
-    "Failed to create project.",
-  );
+  try {
+    await relayClient.publishEvent(
+      projectEvent,
+      "Timed out creating project.",
+      "Failed to create project.",
+    );
+  } catch (error) {
+    if (!isUnsupportedProjectKindError(error)) throw error;
+
+    const [legacyProject] = existingProject?.legacy
+      ? [existingProject]
+      : buildProjectReadModels({
+          projectEvents: [],
+          repositoryEvents: repositoryEvent ? [repositoryEvent] : [],
+          relayOrigin: getCachedRelayOrigin(),
+        });
+    if (!legacyProject) throw error;
+
+    resumableProjectIds.delete(projectId);
+    return {
+      project: legacyProject,
+      compatibilityWarning:
+        "The repository was created, but this relay does not support multi-repository projects yet. It will appear as a standalone project.",
+    };
+  }
 
   const [project] = repositoryEvent
     ? buildProjectReadModels({
@@ -89,7 +117,7 @@ async function createProject(
     throw new Error("The project was created but could not be read.");
   }
   resumableProjectIds.delete(projectId);
-  return project;
+  return { project };
 }
 
 /** Mutation that creates a project and inserts it into the projects cache. */
@@ -100,7 +128,7 @@ export function useCreateProjectMutation() {
   return useMutation({
     mutationFn: (input: CreateProjectInput) =>
       createProject(input, resumableProjectIdsRef.current),
-    onSuccess: (project) => {
+    onSuccess: ({ project }) => {
       queryClient.setQueryData<Project[]>(projectsQueryKey, (current = []) => [
         project,
         ...current.filter((candidate) => candidate.id !== project.id),

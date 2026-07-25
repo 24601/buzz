@@ -1,6 +1,6 @@
 import {
   CircleDot,
-  FolderGit2,
+  Folders,
   GitCommit,
   GitPullRequest,
   TerminalSquare,
@@ -83,7 +83,7 @@ function ProjectUpdatedLabel({
   );
 }
 
-function ProjectPeopleStack({
+export function ProjectPeopleStack({
   pubkeys,
   profiles,
   workOwnerPubkey,
@@ -100,7 +100,7 @@ function ProjectPeopleStack({
   }
 
   return (
-    <div className="flex items-center justify-end -space-x-1.5">
+    <div className="pointer-events-auto flex items-center justify-end -space-x-1.5">
       {visible.map((pubkey, index) => {
         const profile = profiles?.[normalizePubkey(pubkey)];
         const label = resolveUserLabel({ pubkey, profiles });
@@ -167,7 +167,7 @@ const PROJECT_STAT_ITEMS = [
   },
 ] as const;
 
-function ProjectStatsRow({
+export function ProjectStatsRow({
   summary,
   fixedColumns = false,
 }: {
@@ -207,7 +207,7 @@ function ProjectStatsRow({
 
 // Segmented commits/PRs/issues distribution — the card's "progress bar".
 // Hovering thickens the bar and reveals a tooltip with the exact breakdown.
-function ProjectActivityBar({
+export function ProjectActivityBar({
   summary,
 }: {
   summary: ProjectActivitySummary | undefined;
@@ -266,7 +266,7 @@ function StatusPill({ status }: { status: string }) {
 export function EmptyState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 px-4 py-16 text-center">
-      <FolderGit2 className="h-10 w-10 text-muted-foreground/40" />
+      <Folders className="h-10 w-10 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">No projects yet</p>
         <p className="text-sm text-muted-foreground">
@@ -280,7 +280,7 @@ export function EmptyState() {
 export function EmptyFilteredState() {
   return (
     <div className="flex flex-1 flex-col items-center justify-center gap-3 border border-dashed border-border/60 px-4 py-12 text-center">
-      <FolderGit2 className="h-9 w-9 text-muted-foreground/40" />
+      <Folders className="h-9 w-9 text-muted-foreground/40" />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">
           No matching projects
@@ -302,7 +302,7 @@ function ProjectCardButton({
 }) {
   return (
     <button
-      className="absolute inset-0"
+      className="absolute inset-0 z-0 cursor-pointer"
       onClick={() => onOpen(project)}
       type="button"
     >
@@ -425,23 +425,24 @@ export function ProjectGridCard({
       data-testid={`project-card-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="pointer-events-none relative z-10 flex min-h-0 flex-1 flex-col">
         <div className="flex min-w-0 items-center justify-between gap-3 px-4 pt-3">
           <div className="flex min-w-0 items-center gap-2">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
-              <FolderGit2 className="h-4.5 w-4.5 text-muted-foreground" />
+              <Folders className="h-4.5 w-4.5 text-muted-foreground" />
             </span>
             <span className="min-w-0 truncate text-sm font-semibold text-foreground">
               {project.name}
             </span>
-            {project.repositories.length > 1 ? (
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {project.repositories.length} repos
-              </span>
-            ) : null}
+            <span className="shrink-0 text-xs text-muted-foreground">
+              {project.repositories.length}{" "}
+              {project.repositories.length === 1
+                ? "repository"
+                : "repositories"}
+            </span>
             <StatusPill status={project.status} />
           </div>
-          <div className="relative z-10 flex shrink-0 items-center gap-1">
+          <div className="pointer-events-auto relative z-10 flex shrink-0 items-center gap-1">
             <ProjectUpdatedLabel
               profiles={profiles}
               project={project}
@@ -501,21 +502,16 @@ export function ProjectListRow({
       data-testid={`project-row-${project.dtag}`}
     >
       <ProjectCardButton onOpen={onOpen} project={project} />
-      <div className="flex min-w-0 items-start gap-2.5">
-        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+      <div className="pointer-events-none relative z-10 flex min-w-0 items-center gap-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40">
-            <FolderGit2 className="h-4.5 w-4.5 text-muted-foreground" />
+            <Folders className="h-4.5 w-4.5 text-muted-foreground" />
           </span>
-          <div className="-mt-0.5 min-w-0">
+          <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-2">
               <span className={PROJECT_LIST_ROW_TITLE_CLASS}>
                 {project.name}
               </span>
-              {project.repositories.length > 1 ? (
-                <span className="shrink-0 text-xs text-muted-foreground">
-                  {project.repositories.length} repos
-                </span>
-              ) : null}
               <StatusPill status={project.status} />
             </div>
             <p className={PROJECT_LIST_ROW_PREVIEW_CLASS}>
@@ -524,7 +520,16 @@ export function ProjectListRow({
           </div>
         </div>
 
-        <div className={PROJECT_LIST_ROW_TRAILING_CLASS}>
+        <div
+          className={cn(PROJECT_LIST_ROW_TRAILING_CLASS, "pointer-events-auto")}
+        >
+          <div
+            className="hidden w-24 shrink-0 text-xs text-muted-foreground md:block"
+            data-testid="projects-row-context"
+          >
+            {project.repositories.length}{" "}
+            {project.repositories.length === 1 ? "repository" : "repositories"}
+          </div>
           <div
             className="hidden items-center gap-3 xl:flex"
             data-testid="projects-row-summary"
@@ -582,7 +587,7 @@ export function ProjectRailRow({
       <ProjectCardButton onOpen={onOpen} project={project} />
       <div className="flex min-w-0 items-start gap-2">
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-muted/50">
-          <FolderGit2 className="h-3.5 w-3.5 text-muted-foreground" />
+          <Folders className="h-3.5 w-3.5 text-muted-foreground" />
         </span>
         <div className="min-w-0 flex-1">
           <span className="block min-w-0 truncate text-xs font-semibold text-foreground">

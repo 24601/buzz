@@ -16,6 +16,13 @@ export type InitialProjectEventTemplates = {
   repositoryAddress: string;
 };
 
+export function isUnsupportedProjectKindError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /(?:unknown|unsupported) event kind/i.test(error.message)
+  );
+}
+
 function projectDtagFromName(name: string): string {
   return name
     .toLowerCase()

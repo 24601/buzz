@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildInitialProjectEventTemplates } from "./projectCreation.ts";
+import {
+  buildInitialProjectEventTemplates,
+  isUnsupportedProjectKindError,
+} from "./projectCreation.ts";
 
 const OWNER = "a".repeat(64);
 
@@ -59,5 +62,18 @@ test("buildInitialProjectEventTemplates enforces the project content byte limit"
         ownerPubkey: OWNER,
       }),
     /1,024 bytes/,
+  );
+});
+
+test("isUnsupportedProjectKindError recognizes relay kind compatibility failures", () => {
+  assert.equal(
+    isUnsupportedProjectKindError(
+      new Error("restricted: unknown event kind 30621"),
+    ),
+    true,
+  );
+  assert.equal(
+    isUnsupportedProjectKindError(new Error("mock project event rejection")),
+    false,
   );
 });

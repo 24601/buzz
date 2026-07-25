@@ -40,8 +40,15 @@ export function hasLocalCheckout(
   localRepoNames: Set<string>,
 ) {
   return project.repositories.some((repository) =>
-    localRepoCandidates(repository).some((candidate) =>
-      localRepoNames.has(candidate),
-    ),
+    hasLocalRepositoryCheckout(repository, localRepoNames),
+  );
+}
+
+export function hasLocalRepositoryCheckout(
+  repository: Repository,
+  localRepoNames: Set<string>,
+) {
+  return localRepoCandidates(repository).some((candidate) =>
+    localRepoNames.has(candidate),
   );
 }

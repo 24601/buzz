@@ -22,7 +22,7 @@ async function enableProjectsFeature(page: import("@playwright/test").Page) {
 async function openBuzzProject(page: import("@playwright/test").Page) {
   await page.goto("/", { waitUntil: "domcontentloaded" });
   await page.getByTestId("open-projects-view").click();
-  await page.getByRole("button", { name: "Repositories", exact: true }).click();
+  await page.getByTestId("projects-section-projects").click();
   const projectEntry = page
     .locator(
       '[data-testid="project-card-buzz"], [data-testid="project-row-buzz"]',

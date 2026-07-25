@@ -547,18 +547,11 @@ async function fetchProjectLocalRepoSnapshot(
   });
 }
 
-async function fetchProjectActivitySummaries(
-  projects: Project[],
+/** Loads commit, pull-request, and issue activity keyed by repository address. */
+export async function fetchRepositoryActivitySummaries(
+  repositories: Repository[],
 ): Promise<Record<string, ProjectActivitySummary>> {
-  if (projects.length === 0) return {};
-
-  const repositories = [
-    ...new Map(
-      projects
-        .flatMap((project) => project.repositories)
-        .map((repository) => [repository.repoAddress, repository]),
-    ).values(),
-  ];
+  if (repositories.length === 0) return {};
   const events = await relayClient.fetchEvents({
     kinds: [
       KIND_GIT_ISSUE,
@@ -574,10 +567,26 @@ async function fetchProjectActivitySummaries(
     limit: 1_000,
   });
 
-  const summariesByRepository = summarizeProjectActivityEvents(
-    events,
-    repositories,
-  ) as Record<string, ProjectActivitySummary>;
+  return summarizeProjectActivityEvents(events, repositories) as Record<
+    string,
+    ProjectActivitySummary
+  >;
+}
+
+async function fetchProjectActivitySummaries(
+  projects: Project[],
+): Promise<Record<string, ProjectActivitySummary>> {
+  if (projects.length === 0) return {};
+
+  const repositories = [
+    ...new Map(
+      projects
+        .flatMap((project) => project.repositories)
+        .map((repository) => [repository.repoAddress, repository]),
+    ).values(),
+  ];
+  const summariesByRepository =
+    await fetchRepositoryActivitySummaries(repositories);
   return Object.fromEntries(
     projects.map((project) => {
       const summaries = project.repositories.map(

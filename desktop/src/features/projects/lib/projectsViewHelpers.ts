@@ -13,6 +13,7 @@ export type ProjectsFilter =
   | "all"
   | "mine"
   | "local"
+  | "projects"
   | "repositories"
   | "prs"
   | "issues"
@@ -52,6 +53,7 @@ export function readStoredFilter(): ProjectsFilter {
     const value = globalThis.localStorage?.getItem(PROJECTS_FILTER_STORAGE_KEY);
     return value === "mine" ||
       value === "local" ||
+      value === "projects" ||
       value === "repositories" ||
       value === "prs" ||
       value === "issues" ||
