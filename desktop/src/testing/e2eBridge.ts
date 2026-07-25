@@ -70,6 +70,7 @@ type MockManagedAgentSeed = {
   name: string;
   avatarUrl?: string | null;
   personaId?: string | null;
+  teamId?: string | null;
   status?: RawManagedAgent["status"];
   channelNames?: string[];
   channelIds?: string[];
@@ -701,6 +702,7 @@ type RawManagedAgent = {
   pubkey: string;
   name: string;
   persona_id: string | null;
+  team_id?: string | null;
   relay_url: string;
   acp_command: string;
   agent_command: string;
@@ -1452,6 +1454,7 @@ function cloneManagedAgent(agent: MockManagedAgent): RawManagedAgent {
     pubkey: agent.pubkey,
     name: agent.name,
     persona_id: agent.persona_id,
+    team_id: agent.team_id ?? null,
     relay_url: agent.relay_url,
     acp_command: agent.acp_command,
     agent_command: agent.agent_command,
@@ -1985,6 +1988,7 @@ function buildSeededManagedAgent(seed: MockManagedAgentSeed): MockManagedAgent {
     pubkey: seed.pubkey,
     name: seed.name,
     persona_id: seed.personaId ?? null,
+    team_id: seed.teamId ?? null,
     relay_url: DEFAULT_RELAY_WS_URL,
     acp_command: "buzz-acp",
     agent_command: "goose",
