@@ -16,6 +16,8 @@ class _CustomChannelSection extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final void Function(ChannelSortMode mode) onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
   final void Function(Channel channel) onMarkChannelRead;
 
@@ -35,6 +37,8 @@ class _CustomChannelSection extends StatelessWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
     required this.onSelectChannel,
     required this.onMarkChannelRead,
   });
@@ -55,6 +59,8 @@ class _CustomChannelSection extends StatelessWidget {
           onDelete: onDelete,
           onMoveUp: onMoveUp,
           onMoveDown: onMoveDown,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -90,6 +96,8 @@ class _CustomSectionHeader extends ConsumerWidget {
   final VoidCallback onDelete;
   final VoidCallback onMoveUp;
   final VoidCallback onMoveDown;
+  final ChannelSortMode sortMode;
+  final void Function(ChannelSortMode mode) onSortModeChange;
 
   const _CustomSectionHeader({
     required this.section,
@@ -101,6 +109,8 @@ class _CustomSectionHeader extends ConsumerWidget {
     required this.onDelete,
     required this.onMoveUp,
     required this.onMoveDown,
+    required this.sortMode,
+    required this.onSortModeChange,
   });
 
   @override
@@ -184,6 +194,7 @@ class _CustomSectionHeader extends ConsumerWidget {
                       enabled: !isLast,
                       child: const Text('Move Down'),
                     ),
+                    ..._sortMenuItems(sortMode),
                     const PopupMenuItem(value: 'delete', child: Text('Delete')),
                   ],
                 );
@@ -194,6 +205,10 @@ class _CustomSectionHeader extends ConsumerWidget {
                     onMoveUp();
                   case 'move_down':
                     onMoveDown();
+                  case _kSortRecentMenuValue:
+                    onSortModeChange(ChannelSortMode.recent);
+                  case _kSortAlphaMenuValue:
+                    onSortModeChange(ChannelSortMode.alpha);
                   case 'delete':
                     onDelete();
                 }
@@ -222,6 +237,25 @@ CustomEmoji? _resolveCustomEmoji(String icon, List<CustomEmoji> palette) {
   }
   return null;
 }
+
+const String _kSortRecentMenuValue = 'sort_recent';
+const String _kSortAlphaMenuValue = 'sort_alpha';
+
+/// Sort radio items shared by the fixed-group and custom-section menus,
+/// mirroring desktop's Sort → Recent / A–Z options.
+List<PopupMenuEntry<String>> _sortMenuItems(ChannelSortMode current) => [
+  const PopupMenuDivider(),
+  CheckedPopupMenuItem(
+    value: _kSortRecentMenuValue,
+    checked: current == ChannelSortMode.recent,
+    child: const Text('Sort: Recent'),
+  ),
+  CheckedPopupMenuItem(
+    value: _kSortAlphaMenuValue,
+    checked: current == ChannelSortMode.alpha,
+    child: const Text('Sort: A–Z'),
+  ),
+];
 
 class _SectionNameDialog extends HookWidget {
   final String title;
@@ -274,6 +308,8 @@ class _ChannelSection extends StatelessWidget {
   final Set<String> mutedChannelIds;
   final String? currentPubkey;
   final String emptyLabel;
+  final ChannelSortMode? sortMode;
+  final void Function(ChannelSortMode mode)? onSortModeChange;
   final Future<void> Function(Channel channel) onSelectChannel;
 
   const _ChannelSection({
@@ -288,6 +324,8 @@ class _ChannelSection extends StatelessWidget {
     required this.mutedChannelIds,
     required this.currentPubkey,
     required this.emptyLabel,
+    this.sortMode,
+    this.onSortModeChange,
     required this.onSelectChannel,
   });
 
@@ -302,6 +340,8 @@ class _ChannelSection extends StatelessWidget {
           icon: icon,
           expanded: expanded,
           onToggle: onToggle,
+          sortMode: sortMode,
+          onSortModeChange: onSortModeChange,
         ),
         _AnimatedSectionBody(
           expanded: expanded,
@@ -396,17 +436,22 @@ class _SectionHeader extends StatelessWidget {
   final IconData icon;
   final bool expanded;
   final VoidCallback onToggle;
+  final ChannelSortMode? sortMode;
+  final void Function(ChannelSortMode mode)? onSortModeChange;
 
   const _SectionHeader({
     required this.label,
     required this.icon,
     required this.expanded,
     required this.onToggle,
+    this.sortMode,
+    this.onSortModeChange,
   });
 
   @override
   Widget build(BuildContext context) {
     final sectionColor = context.colors.primary;
+    final showSortMenu = sortMode != null && onSortModeChange != null;
 
     return GestureDetector(
       onTap: onToggle,
@@ -436,6 +481,38 @@ class _SectionHeader extends StatelessWidget {
               ),
             ),
             const Spacer(),
+            if (showSortMenu) ...[
+              GestureDetector(
+                onTapUp: (details) async {
+                  final overlay =
+                      Overlay.of(context).context.findRenderObject()!
+                          as RenderBox;
+                  final position = RelativeRect.fromRect(
+                    details.globalPosition & Size.zero,
+                    Offset.zero & overlay.size,
+                  );
+                  final value = await showMenu<String>(
+                    context: context,
+                    position: position,
+                    // _sortMenuItems leads with a divider for the mixed
+                    // custom-section menu; skip it here.
+                    items: _sortMenuItems(sortMode!).skip(1).toList(),
+                  );
+                  switch (value) {
+                    case _kSortRecentMenuValue:
+                      onSortModeChange!(ChannelSortMode.recent);
+                    case _kSortAlphaMenuValue:
+                      onSortModeChange!(ChannelSortMode.alpha);
+                  }
+                },
+                child: Icon(
+                  LucideIcons.ellipsisVertical,
+                  size: _kChannelIconSize,
+                  color: sectionColor,
+                ),
+              ),
+              const SizedBox(width: Grid.quarter),
+            ],
             _SectionChevron(expanded: expanded, color: sectionColor),
           ],
         ),

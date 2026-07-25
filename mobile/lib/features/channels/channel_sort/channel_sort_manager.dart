@@ -5,19 +5,16 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:nostr/nostr.dart' as nostr;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:uuid/uuid.dart';
 
 import '../../../shared/crypto/nip44.dart';
 import '../../../shared/relay/relay.dart';
 import '../read_state/read_state_time.dart';
-import 'channel_sections_storage.dart';
+import 'channel_sort_storage.dart';
 
-const _uuid = Uuid();
-
-class ChannelSectionsCrypto {
+class ChannelSortCrypto {
   final Uint8List _conversationKey;
 
-  ChannelSectionsCrypto(String nsec, String pubkey)
+  ChannelSortCrypto(String nsec, String pubkey)
     : _conversationKey = _deriveKey(nsec, pubkey);
 
   static Uint8List _deriveKey(String nsec, String pubkey) {
@@ -31,17 +28,23 @@ class ChannelSectionsCrypto {
       nip44Decrypt(_conversationKey, ciphertext);
 }
 
-class ChannelSectionsManager {
+/// Syncs per-group sidebar sort preferences across clients via encrypted
+/// NIP-78 app data (kind 30078, d-tag `channel-sort`), mirroring desktop's
+/// `ChannelSortSyncManager`: NIP-44 encrypted-to-self content, debounced
+/// writes, whole-blob last-write-wins, plus the same dirty-state protection
+/// as the mobile sections manager so unpublished edits survive manager
+/// teardown and reconnects.
+class ChannelSortManager {
   final String pubkey;
-  final ChannelSectionsStorage _storage;
-  final ChannelSectionsCrypto _crypto;
+  final ChannelSortStorage _storage;
+  final ChannelSortCrypto _crypto;
   final RelaySessionNotifier? _relaySession;
   final SignedEventRelay? _signedEventRelay;
   final bool _remoteEnabled;
   final VoidCallback _onChanged;
 
-  ChannelSectionStore _store;
-  ChannelSectionStore? _lastPublishedStore;
+  ChannelSortStore _store;
+  ChannelSortStore? _lastPublishedStore;
   Timer? _publishDebounce;
   int _lastRemoteCreatedAt = 0;
   String? _lastRemoteEventId;
@@ -49,34 +52,31 @@ class ChannelSectionsManager {
   bool _disposed = false;
 
   /// Unix seconds of the oldest unpublished local edit; 0 when clean.
-  /// Persisted so unpublished edits survive manager teardown — the provider
-  /// rebuilds this manager on every relay-session status flip, which would
-  /// otherwise drop the pending debounce and let a stale remote blob clobber
-  /// newer local state on the next fetch.
+  /// Persisted so unpublished edits survive manager teardown and restarts.
   int _dirtySince;
 
   /// Bumped on every local edit so a publish only clears the dirty flag when
   /// no new edit landed while the publish was in flight.
   int _editGeneration = 0;
 
-  ChannelSectionsManager({
+  ChannelSortManager({
     required this.pubkey,
     required SharedPreferences prefs,
-    required ChannelSectionsCrypto crypto,
+    required ChannelSortCrypto crypto,
     required RelaySessionNotifier? relaySession,
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
-  }) : _storage = ChannelSectionsStorage(prefs),
+  }) : _storage = ChannelSortStorage(prefs),
        _crypto = crypto,
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
-       _store = ChannelSectionsStorage(prefs).read(pubkey),
-       _dirtySince = ChannelSectionsStorage(prefs).readDirtySince(pubkey);
+       _store = ChannelSortStorage(prefs).read(pubkey),
+       _dirtySince = ChannelSortStorage(prefs).readDirtySince(pubkey);
 
-  ChannelSectionStore get store => _store;
+  ChannelSortStore get store => _store;
 
   @visibleForTesting
   bool get isDirty => _dirtySince > 0;
@@ -92,14 +92,10 @@ class ChannelSectionsManager {
     final foundRemote = await _fetchAndMerge();
     await _startLiveSubscription();
 
-    // Publish-on-reconnect: unpublished local edits (persisted dirty flag)
-    // survive teardown/rebuild and get flushed once we're connected again.
-    // Seed-publish: if the relay confirmed it has no blob at all but local
-    // state exists, push local up so other clients can sync. `foundRemote`
+    // Publish-on-reconnect for unpublished local edits, and seed-publish when
+    // the relay confirmed it has no blob but local prefs exist. `foundRemote`
     // is null when the fetch failed — never seed-publish on a failed fetch.
-    if (_dirtySince > 0 ||
-        (foundRemote == false &&
-            (_store.sections.isNotEmpty || _store.assignments.isNotEmpty))) {
+    if (_dirtySince > 0 || (foundRemote == false && _store.groups.isNotEmpty)) {
       markDirty();
     }
     _onChanged();
@@ -121,102 +117,26 @@ class ChannelSectionsManager {
     _unsubscribe = null;
   }
 
-  void createSection(String name) {
+  void setSortModeFor(
+    String groupKey,
+    ChannelSortMode mode, {
+    Iterable<String>? liveSectionIds,
+  }) {
     if (_disposed) return;
-    final maxOrder = _store.sections.fold<int>(
-      -1,
-      (max, s) => s.order > max ? s.order : max,
+    final updated = ChannelSortStore(
+      groups: {..._store.groups, groupKey: mode},
     );
-    final section = ChannelSection(
-      id: _uuid.v4(),
-      name: name.trim(),
-      order: maxOrder + 1,
-    );
-    _store = ChannelSectionStore(
-      sections: [..._store.sections, section],
-      assignments: _store.assignments,
-    );
+    // Prune sort modes left behind by deleted custom sections on write so the
+    // stored map can't grow unboundedly with stale `section:` keys.
+    _store = liveSectionIds != null
+        ? stripOrphanedSectionModes(updated, liveSectionIds)
+        : updated;
     _persist();
     markDirty();
   }
 
-  void renameSection(String sectionId, String newName) {
-    if (_disposed) return;
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id == sectionId)
-            ChannelSection(
-              id: s.id,
-              name: newName.trim(),
-              icon: s.icon,
-              order: s.order,
-            )
-          else
-            s,
-      ],
-      assignments: _store.assignments,
-    );
-    _persist();
-    markDirty();
-  }
-
-  void deleteSection(String sectionId) {
-    if (_disposed) return;
-    final updatedAssignments = Map<String, String>.from(_store.assignments)
-      ..removeWhere((_, sid) => sid == sectionId);
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id != sectionId) s,
-      ],
-      assignments: updatedAssignments,
-    );
-    _persist();
-    markDirty();
-  }
-
-  void moveSectionUp(String sectionId) {
-    if (_disposed) return;
-    final sorted = _sortedSections();
-    final idx = sorted.indexWhere((s) => s.id == sectionId);
-    if (idx <= 0) return;
-    _swapOrders(sorted, idx, idx - 1);
-    markDirty();
-  }
-
-  void moveSectionDown(String sectionId) {
-    if (_disposed) return;
-    final sorted = _sortedSections();
-    final idx = sorted.indexWhere((s) => s.id == sectionId);
-    if (idx < 0 || idx >= sorted.length - 1) return;
-    _swapOrders(sorted, idx, idx + 1);
-    markDirty();
-  }
-
-  void assignChannel(String channelId, String sectionId) {
-    if (_disposed) return;
-    final updated = Map<String, String>.from(_store.assignments)
-      ..[channelId] = sectionId;
-    _store = ChannelSectionStore(
-      sections: _store.sections,
-      assignments: updated,
-    );
-    _persist();
-    markDirty();
-  }
-
-  void unassignChannel(String channelId) {
-    if (_disposed) return;
-    final updated = Map<String, String>.from(_store.assignments)
-      ..remove(channelId);
-    _store = ChannelSectionStore(
-      sections: _store.sections,
-      assignments: updated,
-    );
-    _persist();
-    markDirty();
-  }
+  ChannelSortMode sortModeFor(String groupKey) =>
+      _store.groups[groupKey] ?? kDefaultSortMode;
 
   void markDirty() {
     if (_disposed) return;
@@ -236,8 +156,8 @@ class ChannelSectionsManager {
     });
   }
 
-  /// Returns whether the relay reported a `channel-sections` blob, or null
-  /// when the fetch failed (offline / relay error).
+  /// Returns whether the relay reported a `channel-sort` blob, or null when
+  /// the fetch failed (offline / relay error).
   Future<bool?> _fetchAndMerge() async {
     if (_relaySession == null) return null;
     try {
@@ -246,7 +166,7 @@ class ChannelSectionsManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sort'],
           },
           limit: 1,
         ),
@@ -255,7 +175,7 @@ class ChannelSectionsManager {
       _persist();
       if (!_disposed) _onChanged();
       return events.any(
-        (e) => e.pubkey == pubkey && e.getTagValue('d') == 'channel-sections',
+        (e) => e.pubkey == pubkey && e.getTagValue('d') == 'channel-sort',
       );
     } catch (_) {
       // Local state remains usable when relay is unavailable.
@@ -271,7 +191,7 @@ class ChannelSectionsManager {
           kinds: const [EventKind.readState],
           authors: [pubkey],
           tags: const {
-            '#d': ['channel-sections'],
+            '#d': ['channel-sort'],
           },
           limit: 1,
         ),
@@ -290,16 +210,16 @@ class ChannelSectionsManager {
   }
 
   void _mergeEvent(NostrEvent event) {
-    // Only process channel-sections d-tag events.
+    // Only process channel-sort d-tag events.
     final dTag = event.getTagValue('d');
-    if (dTag != 'channel-sections') return;
+    if (dTag != 'channel-sort') return;
 
     try {
       final plaintext = _crypto.decrypt(event.content);
       final parsed = jsonDecode(plaintext);
       if (parsed is! Map<String, dynamic>) return;
 
-      final incoming = ChannelSectionStore.fromJson(parsed);
+      final incoming = ChannelSortStore.fromJson(parsed);
 
       // Last-write-wins: newer createdAt wins; tie-break by event ID.
       final isNewer =
@@ -311,11 +231,7 @@ class ChannelSectionsManager {
         _lastRemoteCreatedAt = event.createdAt;
         _lastRemoteEventId = event.id;
         // Dirty-state protection: never let a remote blob overwrite
-        // unpublished local edits. Whole-blob LWW would otherwise adopt a
-        // stale remote store fetched right after a teardown/rebuild and
-        // silently drop the just-made edit. We still advance
-        // _lastRemoteCreatedAt above so our eventual publish sorts after the
-        // remote event; the pending publish then reconciles the relay.
+        // unpublished local edits; the pending publish reconciles the relay.
         if (_dirtySince > 0) return;
         _store = incoming;
         _persist();
@@ -334,20 +250,9 @@ class ChannelSectionsManager {
   bool _isIdenticalToLastPublished() {
     final last = _lastPublishedStore;
     if (last == null) return false;
-    if (last.sections.length != _store.sections.length) return false;
-    if (last.assignments.length != _store.assignments.length) return false;
-    for (var i = 0; i < _store.sections.length; i++) {
-      final a = last.sections[i];
-      final b = _store.sections[i];
-      if (a.id != b.id ||
-          a.name != b.name ||
-          a.icon != b.icon ||
-          a.order != b.order) {
-        return false;
-      }
-    }
-    for (final key in _store.assignments.keys) {
-      if (last.assignments[key] != _store.assignments[key]) return false;
+    if (last.groups.length != _store.groups.length) return false;
+    for (final key in _store.groups.keys) {
+      if (last.groups[key] != _store.groups[key]) return false;
     }
     return true;
   }
@@ -381,20 +286,17 @@ class ChannelSectionsManager {
         kind: EventKind.readState,
         content: ciphertext,
         tags: [
-          ['d', 'channel-sections'],
-          ['t', 'channel-sections'],
+          ['d', 'channel-sort'],
+          ['t', 'channel-sort'],
         ],
         createdAt: createdAt,
       );
 
       _lastRemoteCreatedAt = max(_lastRemoteCreatedAt, createdAt);
-      _lastPublishedStore = ChannelSectionStore(
-        sections: List.of(_store.sections),
-        assignments: Map.of(_store.assignments),
-      );
+      _lastPublishedStore = ChannelSortStore(groups: Map.of(_store.groups));
       _clearDirty(generationAtStart);
     } catch (error) {
-      debugPrint('[ChannelSectionsManager] publish failed: $error');
+      debugPrint('[ChannelSortManager] publish failed: $error');
       // Dirty flag stays set; the next initialize() re-schedules the publish.
     }
   }
@@ -410,32 +312,5 @@ class ChannelSectionsManager {
 
   void _persist() {
     _storage.write(pubkey, _store);
-  }
-
-  List<ChannelSection> _sortedSections() {
-    final sorted = _store.sections.toList()
-      ..sort((a, b) => a.order.compareTo(b.order));
-    return sorted;
-  }
-
-  void _swapOrders(List<ChannelSection> sorted, int indexA, int indexB) {
-    final orderA = sorted[indexA].order;
-    final orderB = sorted[indexB].order;
-    final idA = sorted[indexA].id;
-    final idB = sorted[indexB].id;
-
-    _store = ChannelSectionStore(
-      sections: [
-        for (final s in _store.sections)
-          if (s.id == idA)
-            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderB)
-          else if (s.id == idB)
-            ChannelSection(id: s.id, name: s.name, icon: s.icon, order: orderA)
-          else
-            s,
-      ],
-      assignments: _store.assignments,
-    );
-    _persist();
   }
 }

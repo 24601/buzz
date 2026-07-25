@@ -4,6 +4,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 String channelSectionsKey(String pubkey) => 'buzz.channel-sections.v1:$pubkey';
 
+String channelSectionsDirtySinceKey(String pubkey) =>
+    'buzz.channel-sections.dirty-since.v1:$pubkey';
+
 class ChannelSection {
   final String id;
   final String name;
@@ -112,5 +115,19 @@ class ChannelSectionsStorage {
 
   void write(String pubkey, ChannelSectionStore store) {
     _prefs.setString(channelSectionsKey(pubkey), jsonEncode(store.toJson()));
+  }
+
+  /// Unix seconds of the oldest unpublished local edit, or 0 when local state
+  /// has been fully published. Persisted so unpublished edits survive manager
+  /// teardown (relay status flips rebuild the provider) and app restarts.
+  int readDirtySince(String pubkey) =>
+      _prefs.getInt(channelSectionsDirtySinceKey(pubkey)) ?? 0;
+
+  void writeDirtySince(String pubkey, int dirtySince) {
+    if (dirtySince <= 0) {
+      _prefs.remove(channelSectionsDirtySinceKey(pubkey));
+    } else {
+      _prefs.setInt(channelSectionsDirtySinceKey(pubkey), dirtySince);
+    }
   }
 }
