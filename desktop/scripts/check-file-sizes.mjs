@@ -131,7 +131,20 @@ const overrides = new Map([
   // record_provider param + applies persona_field_with_record_fallback. +5 lines.
   // global-agent-config: spawn_agent_child loads global config and merges as
   // lowest env layer (+8 lines). Queued to split.
-  ["src-tauri/src/managed_agents/runtime.rs", 2216],
+  // +2: BYOH orphan-sweep fix — `!belongs && !has_buzz_marker` OR-gate replaces
+  // the old AND-gate so custom harness processes are not silently leaked on crash.
+  // +27: BYOH F4 fix — extract shared `buzz_sweep_owns_process` predicate, fix
+  // Linux AND-gate in sweep + orphan collectors, 4 production predicate tests.
+  // +12: BYOH F2 — record_agent_command / effective_agent_command check loaded
+  // harness registry for preset/custom ids after static-builtin lookup.
+  // +61: BYOH pass-2 — I2 (spawn_agent_child env+args from definition), I3
+  // (valid_agent_runtime_receipt uses buzz_sweep_owns_process marker-only),
+  // I6 (cross-platform buzz_sweep_owns_process, drop #[cfg(unix)]), +2 new
+  // receipt-path collector-decision tests.
+  // +2: BYOH Phase A — resolve_effective_harness_descriptor single typed resolver;
+  // C-9 injectable sweep predicates (kill_stale_tracked_processes_with +
+  // valid_agent_runtime_receipt_with) with 5 discriminating tests.
+  ["src-tauri/src/managed_agents/runtime.rs", 2326],
   // config-bridge setup-payload env-boundary fix adds readiness wiring in
   // spawn_agent_child; load-bearing security fix, queued to split.
   ["src-tauri/src/managed_agents/config_bridge/reader.rs", 1016],
@@ -177,11 +190,15 @@ const overrides = new Map([
   // Windows Doctor install fix: cli_install_commands_windows field added to test stubs.
   // team-instructions-first-class: ManagedAgentRecord fixture gains the new
   // team_id field (+1 line).
-  ["src-tauri/src/managed_agents/readiness.rs", 1765],
+  ["src-tauri/src/managed_agents/readiness.rs", 1863],
   // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
   // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
-  ["src-tauri/src/managed_agents/runtime/tests.rs", 1041],
+  // +34: BYOH custom-harness sweep condition unit tests — 3 tests validating
+  // the OR-gate fix for custom-binary orphan cleanup.
+  // +26: BYOH pass-2 I3 — 2 collector-decision tests for receipt path
+  // ownership (valid_agent_runtime_receipt uses buzz_sweep_owns_process).
+  ["src-tauri/src/managed_agents/runtime/tests.rs", 1320],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -231,7 +248,12 @@ const overrides = new Map([
   // doc comment) and AgentTeam/CreateTeamInput/UpdateTeamInput.instructions
   // (+3) — the new team-id spawn link and the runtime-layered instructions
   // field.
-  ["src/shared/api/types.ts", 1047],
+  // byoh-env-roundtrip: AcpRuntimeCatalogEntry.definitionEnv field + JSDoc
+  // (+12 lines) so the edit form can read back existing env vars on save.
+  // Load-bearing correctness fix. Queued to split.
+  // +2: AcpRuntimeCatalogEntry.requiresExternalCli field added by main
+  // (#2680) to indicate runtimes that need a separate CLI install.
+  ["src/shared/api/types.ts", 1051],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -296,7 +318,26 @@ const overrides = new Map([
   // Buzz-managed Node path helpers and resolution tests moved to
   // managed_node_paths.rs and discovery/tests/managed_path_resolution.rs;
   // ratcheting 1366 -> 1392 after adding the managed-path probes to discovery.
-  ["src-tauri/src/managed_agents/discovery.rs", 1393],
+  // +17: BYOH custom harness catalog merge phase-3 — append custom definitions
+  // from custom_harnesses_dir with PATH-probe availability; source tagging.
+  // +148: BYOH F2/F3 — PRESET_HARNESSES static data (6 presets), Phase 2.5 in
+  // discover_acp_runtimes_from (PATH-probe each preset, build catalog entries,
+  // populate loaded-harness registry), record/effective command resolution now
+  // checks loaded registry for preset/custom ids. Queued to split presets out.
+  // +3: BYOH F5 — seen_ids rejects preset/builtin collisions from custom files.
+  // +79: BYOH pass-2 C1 — 4 registry lifecycle tests (warm→spawn, delete→
+  // dangling, immediate save+start, edit with rename); try_record_agent_command
+  // typed error for dangling ids wired into spawn; readiness/spawn_hash now
+  // include definition env floor.
+  // +7: BYOH pass-2 I2 env round-trip — definition_env field populated in
+  // custom catalog entries + 2 discriminating tests (custom env preserved,
+  // builtin env empty). Load-bearing edit round-trip fix.
+  // +16: BYOH scope addition — Hermes Agent + OpenClaw preset entries (two
+  // data-only PresetHarness structs; no new logic or test functions).
+  // +29: rebase over main (#2680) — discover_acp_runtime_phase1 extracted
+  // helper + discover_acp_runtime_availability; both load-bearing for
+  // post-install verification. Semantic composition with BYOH changes.
+  ["src-tauri/src/managed_agents/discovery.rs", 1706],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -307,7 +348,11 @@ const overrides = new Map([
   // None regression, .cmd shim resolution, no-git-bash error hint.
   // +32: deterministic .cmd resolver + no-registry + install_shell_from tests.
   // Managed-path resolution test split to discovery/tests/managed_path_resolution.rs.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1273],
+  // +227: BYOH pass-2 C1 — 4 registry lifecycle tests (warm→spawn, delete→dangling,
+  // immediate save+start, edit with rename) added to discovery/tests.rs.
+  // +64: BYOH pass-2 I2 env round-trip — 2 discriminating tests proving custom
+  // catalog entries carry definition_env and builtins do not.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1576],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -500,7 +545,17 @@ const overrides = new Map([
   // Includes unit tests for detection, routing, and -Command body preservation.
   // +16: test_powershell_command_goose_catalog_dequoted proves the \$→$ escape
   // fix for the Goose Windows installer (PR #2680 interaction with #2750).
-  ["src-tauri/src/commands/agent_discovery.rs", 1826],
+  // +126: BYOH — save_custom_harness (validate, atomic write, return entry) +
+  // delete_custom_harness (id-guard, builtin reject, remove file) commands;
+  // discover_acp_providers updated to pass AppHandle + custom_harnesses dir.
+  // +30: BYOH F5 — atomic-write-file dep, original_id rename/delete support.
+  // +13: BYOH pass-2 C1 — warm_harness_registry_from_dir call in save and
+  // delete commands now verifies transactional registry refresh.
+  // +2: BYOH pass-2 I2 env round-trip — definition_env carried through save
+  // return value so the frontend immediately has the updated env.
+  // +1: rebase over main (#2680) — requires_external_cli: false added to
+  // save_custom_harness catalog entry construction (new required field).
+  ["src-tauri/src/commands/agent_discovery.rs", 2038],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to

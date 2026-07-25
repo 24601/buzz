@@ -11,10 +11,10 @@ use crate::{
     app_state::AppState,
     managed_agents::{
         build_managed_agent_summary, current_instance_id, discovery_env_with_baked_floor,
-        find_managed_agent_mut, known_acp_runtime, load_managed_agents, load_personas,
-        managed_agent_avatar_url, missing_command_message, normalize_agent_args, resolve_command,
-        save_managed_agents, sync_managed_agent_processes, try_regenerate_nest, AgentModelInfo,
-        AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
+        find_managed_agent_mut, known_acp_runtime, load_global_agent_config, load_managed_agents,
+        load_personas, managed_agent_avatar_url, missing_command_message, normalize_agent_args,
+        resolve_command, save_managed_agents, sync_managed_agent_processes, try_regenerate_nest,
+        AgentModelInfo, AgentModelsResponse, UpdateManagedAgentRequest, UpdateManagedAgentResponse,
         DEFAULT_ACP_COMMAND,
     },
     relay::{relay_ws_url_with_override, sync_managed_agent_profile},
@@ -62,27 +62,34 @@ pub async fn get_agent_models(
         // so model discovery runs against the persona's current harness, not the
         // frozen record snapshot. An explicit per-agent override wins.
         let personas = load_personas(&app).unwrap_or_default();
-        let effective_command = crate::managed_agents::record_agent_command(record, &personas);
+        let global = load_global_agent_config(&app).unwrap_or_default();
 
-        let args = normalize_agent_args(&effective_command, record.agent_args.clone());
+        // Single typed descriptor — same resolver as spawn_agent_child.
+        // Returns Err on dangling harness id, propagating it to the caller.
+        let descriptor =
+            crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
+                .map_err(|e| format!("cannot discover models for {pubkey}: {e}"))?;
 
-        let resolved_agent = resolve_command(&effective_command)
+        let resolved_agent = resolve_command(&descriptor.command)
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| effective_command.clone());
+            .unwrap_or_else(|| descriptor.command.clone());
 
-        // ModelPicker can persist a selected model but not rewrite the saved
-        // provider/env snapshot, and runtime spawn reads that same snapshot.
-        // Discover models against the record snapshot so an out-of-date persona
-        // cannot offer models for a provider this agent will not launch with.
-        let discovery = saved_agent_model_discovery_config(record, &effective_command);
+        let discovery_model = record.model.clone();
+        let discovery_provider = descriptor
+            .env
+            .get("BUZZ_AGENT_PROVIDER")
+            .cloned()
+            .or_else(|| record.provider.clone());
+        let discovery_env = descriptor.env;
+        let args = descriptor.args;
 
         (
             resolved,
             resolved_agent,
             args,
-            discovery.model,
-            discovery.provider,
-            discovery.env,
+            discovery_model,
+            discovery_provider,
+            discovery_env,
         )
     }; // store lock released — subprocess runs without holding the lock
 
@@ -130,37 +137,6 @@ pub async fn get_agent_models(
     .await
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct SavedAgentModelDiscoveryConfig {
-    model: Option<String>,
-    provider: Option<String>,
-    env: BTreeMap<String, String>,
-}
-
-fn saved_agent_model_discovery_config(
-    record: &crate::managed_agents::ManagedAgentRecord,
-    agent_command: &str,
-) -> SavedAgentModelDiscoveryConfig {
-    let mut derived_env = BTreeMap::new();
-    if let Some(meta) = known_acp_runtime(agent_command) {
-        for (key, value) in crate::managed_agents::runtime_metadata_env_vars(
-            meta.model_env_var,
-            meta.provider_env_var,
-            meta.provider_locked,
-            record.model.as_deref(),
-            record.provider.as_deref(),
-        ) {
-            derived_env.insert(key.to_string(), value.to_string());
-        }
-    }
-
-    SavedAgentModelDiscoveryConfig {
-        model: record.model.clone(),
-        provider: record.provider.clone(),
-        env: crate::managed_agents::merged_user_env(&derived_env, &record.env_vars),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiscoverAgentModelsInput {
@@ -173,6 +149,10 @@ pub struct DiscoverAgentModelsInput {
     pub provider: Option<String>,
     #[serde(default)]
     pub env_vars: BTreeMap<String, String>,
+    /// Definition-level env from the harness definition (custom/preset).
+    /// Merged below user `env_vars` so user overrides always win.
+    #[serde(default)]
+    pub definition_env: BTreeMap<String, String>,
 }
 
 /// Query available models from an unsaved agent configuration.
@@ -186,6 +166,8 @@ pub async fn discover_agent_models(
     state: State<'_, AppState>,
 ) -> Result<AgentModelsResponse, String> {
     crate::managed_agents::validate_user_env_keys(&input.env_vars)?;
+    // Also validate definition_env (caller-supplied, same trust level as env_vars).
+    crate::managed_agents::validate_user_env_keys(&input.definition_env)?;
 
     let acp_command = input
         .acp_command
@@ -218,7 +200,18 @@ pub async fn discover_agent_models(
             }
         }
     }
-    let merged_env = crate::managed_agents::merged_user_env(&derived_env, &input.env_vars);
+    // Layer definition_env below user env_vars so user overrides always win.
+    // Reserved keys are stripped, matching the same filter applied at spawn.
+    let mut filtered_definition_env = BTreeMap::new();
+    for (key, value) in &input.definition_env {
+        if !crate::managed_agents::is_reserved_env_key(key) {
+            filtered_definition_env.insert(key.clone(), value.clone());
+        }
+    }
+    // Merge: derived (metadata) → definition env → user env_vars.
+    let merged_with_def =
+        crate::managed_agents::merged_user_env(&derived_env, &filtered_definition_env);
+    let merged_env = crate::managed_agents::merged_user_env(&merged_with_def, &input.env_vars);
     let merged_env = discovery_env_with_baked_floor(merged_env);
 
     // Buzz shared compute discovery must not depend on the local OpenAI ingress: that

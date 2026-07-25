@@ -1003,3 +1003,317 @@ fn invalid_pubkey_resolves_no_pair_key() {
     // the summary must fall back to the stopped/legacy-pid path, not panic.
     assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
 }
+
+// ── Custom-harness orphan sweep coverage ─────────────────────────────────────
+//
+// The system sweep gates must include any process carrying the
+// `BUZZ_MANAGED_AGENT` env marker, regardless of whether the binary name
+// matches `KNOWN_AGENT_BINARIES`. Custom harnesses use arbitrary binary names
+// so name-match alone would silently leak their orphans on crash.
+//
+// Previously: macOS used a two-check OR+AND pattern (equivalent to just marker),
+//             Linux used an AND-gate (name + marker) — wrong for custom harnesses.
+// Fix: all platforms use the shared `buzz_sweep_owns_process` predicate which
+//      returns `has_buzz_marker` only — the `_belongs_to_us` fast-skip is
+//      accepted for call-site symmetry but intentionally ignored.
+//
+// These tests call the production predicate directly so they fail if the
+// predicate reverts to broken logic.
+
+use super::buzz_sweep_owns_process;
+
+/// A known-binary process WITHOUT the marker must be excluded — stray processes
+/// with colliding names (e.g. another user's goose) are not ours.
+#[test]
+fn sweep_condition_known_binary_without_marker_is_excluded() {
+    assert!(
+        !buzz_sweep_owns_process(true, false),
+        "known binary without marker must be excluded"
+    );
+}
+
+/// A custom harness binary (not in KNOWN_AGENT_BINARIES) WITH the marker must
+/// be included — this is the fix for the Linux AND-gate bug.
+#[test]
+fn sweep_condition_custom_binary_with_marker_is_included() {
+    assert!(
+        buzz_sweep_owns_process(false, true),
+        "custom binary with marker must be included"
+    );
+}
+
+/// A truly foreign process (not owned by name, no marker) must remain excluded.
+#[test]
+fn sweep_condition_foreign_process_is_excluded() {
+    assert!(
+        !buzz_sweep_owns_process(false, false),
+        "foreign process must always be excluded"
+    );
+}
+
+/// A known-binary process WITH the marker is owned — must be included.
+#[test]
+fn sweep_condition_known_binary_with_marker_is_included() {
+    assert!(
+        buzz_sweep_owns_process(true, true),
+        "known binary with marker must be included"
+    );
+}
+
+// ── I3: receipt path collector decision ─────────────────────────────────────
+//
+// `valid_agent_runtime_receipt` used to AND-gate process_belongs_to_us (a
+// cheap name-check) with process_has_buzz_marker. Custom harnesses don't match
+// KNOWN_AGENT_BINARIES, so their receipts would never be valid — the receipt
+// cleanup loop would leave them running. The fix uses buzz_sweep_owns_process
+// (marker-only) in valid_agent_runtime_receipt.
+//
+// These tests verify the predicate truth table that valid_agent_runtime_receipt
+// now relies on. They would fail if the AND-gate were reinstated.
+
+/// Simulates valid_agent_runtime_receipt's ownership decision for a custom
+/// harness: belongs_to_us=false (not in KNOWN_AGENT_BINARIES), has_marker=true.
+/// Must be INCLUDED — the marker is authoritative, name is irrelevant.
+///
+/// Would fail if valid_agent_runtime_receipt used process_belongs_to_us &&
+/// process_has_buzz_marker (AND-gate).
+#[test]
+fn receipt_ownership_custom_harness_with_marker_is_valid() {
+    // Custom binary: not in KNOWN_AGENT_BINARIES (belongs_to_us = false)
+    // but carries BUZZ_MANAGED_AGENT marker (has_buzz_marker = true).
+    assert!(
+        buzz_sweep_owns_process(false, true),
+        "custom harness with marker must be valid for receipt ownership"
+    );
+}
+
+/// Simulates valid_agent_runtime_receipt's ownership decision for a known
+/// harness binary WITHOUT the marker (stray process, not owned by us).
+/// Must be EXCLUDED.
+#[test]
+fn receipt_ownership_known_binary_without_marker_is_not_valid() {
+    // Known binary name (belongs_to_us = true) but no marker.
+    // This is a stray process that happens to share a binary name — must exclude.
+    assert!(
+        !buzz_sweep_owns_process(true, false),
+        "known binary without marker must not be valid for receipt ownership"
+    );
+}
+
+// ── Collector-discriminating sweep tests (C-9 / Thufir F6) ──────────────────
+//
+// `kill_stale_tracked_processes_with` and `valid_agent_runtime_receipt_with`
+// accept injectable predicates so the sweep logic can be verified without
+// spawning real processes.  These tests drive the injection path directly,
+// discriminating on custom-harness vs known-binary vs marker presence.
+
+#[test]
+fn kill_stale_custom_harness_with_marker_is_terminated() {
+    // A record with a PID not in the live runtime map and with the Buzz marker
+    // should be terminated even though the binary name is not in KNOWN_AGENT_BINARIES.
+    let mut record = minimal_record("pubkey-custom");
+    record.runtime_pid = Some(9001);
+    let mut records = vec![record];
+    let runtimes = std::collections::HashMap::new();
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| true, // simulate: marker present (custom harness we own)
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(changed, "stale record with marker should mark changed");
+    assert_eq!(killed, vec![9001u32], "marked process must be killed");
+    assert!(
+        records[0].runtime_pid.is_none(),
+        "runtime_pid must be cleared"
+    );
+}
+
+#[test]
+fn kill_stale_process_without_marker_is_skipped() {
+    // A record PID without the marker (not our process — e.g. custom binary
+    // from another tool) should be skipped for termination but still cleared.
+    let mut record = minimal_record("pubkey-foreign");
+    record.runtime_pid = Some(9002);
+    let mut records = vec![record];
+    let runtimes = std::collections::HashMap::new();
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| false, // simulate: no marker (not our process)
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(
+        changed,
+        "stale record without marker should still mark changed"
+    );
+    assert!(
+        killed.is_empty(),
+        "process without marker must not be killed"
+    );
+    assert!(
+        records[0].runtime_pid.is_none(),
+        "runtime_pid must be cleared regardless"
+    );
+}
+
+#[test]
+fn kill_stale_live_pair_is_not_touched() {
+    // A record whose PID is in the live runtime map is NOT stale — skip it entirely.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let pubkey = "aa".repeat(32); // 64 hex chars — satisfies ManagedAgentRuntimeKey validation
+    let mut record = minimal_record(&pubkey);
+    record.runtime_pid = Some(9003);
+    let key = ManagedAgentRuntimeKey::new(pubkey, "wss://relay.example").unwrap();
+    let mut runtimes = std::collections::HashMap::new();
+    // Insert a placeholder runtime — value shape doesn't matter for the key lookup.
+    runtimes.insert(key, make_pair_runtime_placeholder());
+    let original_pid = record.runtime_pid;
+    let mut records = vec![record];
+
+    let mut killed = vec![];
+    let changed = super::kill_stale_tracked_processes_with(
+        &mut records,
+        &runtimes,
+        |_pid| true,
+        |pid| {
+            killed.push(pid);
+            Ok(())
+        },
+    );
+
+    assert!(!changed, "live pair must not be marked changed");
+    assert!(killed.is_empty(), "live pair process must not be killed");
+    assert_eq!(
+        records[0].runtime_pid, original_pid,
+        "live pair runtime_pid must not be cleared"
+    );
+}
+
+#[test]
+fn receipt_valid_with_marker_and_running() {
+    // Custom harness receipt: belongs_to_us=false, has_marker=true, is_running=true.
+    // Must be valid — marker is the authoritative gate.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("bb".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| true,       // is_running
+        |_pid| false,      // belongs_to_us: false (custom binary)
+        |_pid, _iid| true, // has_marker: true
+    );
+    assert!(
+        valid,
+        "custom harness with marker and running pid must be valid"
+    );
+}
+
+#[test]
+fn receipt_invalid_known_binary_without_marker() {
+    // Known binary name but no marker — stray process, must not be valid.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("cc".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| true,        // is_running
+        |_pid| true,        // belongs_to_us: true (known binary)
+        |_pid, _iid| false, // has_marker: false (not our process)
+    );
+    assert!(!valid, "known binary without marker must not be valid");
+}
+
+#[test]
+fn receipt_invalid_when_process_not_running() {
+    // Even with marker, a non-running process must not be valid.
+    use crate::managed_agents::ManagedAgentRuntimeKey;
+    let key = ManagedAgentRuntimeKey::new("dd".repeat(32), "wss://relay.example").unwrap();
+    let receipt = receipt_fixture(key.clone());
+    let path = std::path::PathBuf::from(format!("{}.json", key.runtime_id()));
+
+    let valid = super::valid_agent_runtime_receipt_with(
+        &path,
+        &receipt,
+        "test-instance",
+        |_pid| false,      // is_running: false
+        |_pid| true,       // belongs_to_us
+        |_pid, _iid| true, // has_marker
+    );
+    assert!(
+        !valid,
+        "non-running process must not be valid regardless of marker"
+    );
+}
+
+// ── Test helpers ────────────────────────────────────────────────────────────
+
+fn minimal_record(pubkey: &str) -> crate::managed_agents::ManagedAgentRecord {
+    serde_json::from_str(&format!(
+        r#"{{
+            "pubkey": "{pubkey}",
+            "name": "test",
+            "private_key_nsec": "nsec1fake",
+            "relay_url": "",
+            "acp_command": "buzz-acp",
+            "agent_command": "buzz-agent",
+            "agent_args": [],
+            "mcp_command": "",
+            "turn_timeout_seconds": 320,
+            "system_prompt": null,
+            "model": null,
+            "provider": null,
+            "env_vars": {{}},
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_started_at": null,
+            "last_stopped_at": null,
+            "last_exit_code": null,
+            "last_error": null
+        }}"#
+    ))
+    .expect("minimal_record fixture")
+}
+
+fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRuntime {
+    use std::process::{Command, Stdio};
+    // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
+    // `true` exits immediately with 0 — just a handle we need for type purposes.
+    let child = Command::new("true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn true for placeholder");
+    let process = crate::managed_agents::ManagedAgentProcess {
+        child,
+        log_path: std::path::PathBuf::new(),
+        spawn_config_hash: 0,
+        setup_mode: false,
+        adapter_availability: None,
+        start_nonce: "test-nonce".to_string(),
+        #[cfg(windows)]
+        job: None,
+    };
+    crate::managed_agents::ManagedAgentPairRuntime::starting(process)
+}

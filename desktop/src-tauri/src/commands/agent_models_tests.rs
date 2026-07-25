@@ -173,6 +173,7 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
             "relay_url": "wss://localhost:3000",
             "acp_command": "buzz-acp",
             "agent_command": "goose",
+            "agent_command_override": "goose",
             "agent_args": [],
             "mcp_command": "",
             "turn_timeout_seconds": 320,
@@ -193,23 +194,30 @@ fn saved_agent_model_discovery_uses_record_snapshot() {
     )
     .expect("sample managed agent record");
 
-    let config = saved_agent_model_discovery_config(&record, "goose");
+    // resolve_effective_harness_descriptor is the single resolver used by
+    // get_agent_models — verify it layers env correctly and strips reserved keys.
+    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
+        &record,
+        &[],
+        &Default::default(),
+    )
+    .expect("descriptor should resolve for a valid record");
 
-    assert_eq!(config.model.as_deref(), Some("record-model"));
-    assert_eq!(config.provider.as_deref(), Some("databricks"));
+    assert_eq!(descriptor.command.as_str(), "goose");
     assert_eq!(
-        config.env.get("GOOSE_MODEL").map(String::as_str),
+        descriptor.env.get("GOOSE_MODEL").map(String::as_str),
         Some("record-model")
     );
     assert_eq!(
-        config.env.get("GOOSE_PROVIDER").map(String::as_str),
+        descriptor.env.get("GOOSE_PROVIDER").map(String::as_str),
         Some("databricks")
     );
     assert_eq!(
-        config.env.get("OPENAI_API_KEY").map(String::as_str),
+        descriptor.env.get("OPENAI_API_KEY").map(String::as_str),
         Some("record-key")
     );
-    assert!(!config.env.contains_key("BUZZ_PRIVATE_KEY"));
+    // Reserved keys are stripped from the descriptor env.
+    assert!(!descriptor.env.contains_key("BUZZ_PRIVATE_KEY"));
 }
 
 // ---------------------------------------------------------------------------

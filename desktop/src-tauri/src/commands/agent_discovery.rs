@@ -61,14 +61,225 @@ pub(crate) fn plan_adapter_install<'c>(
 }
 
 #[tauri::command]
-pub async fn discover_acp_providers() -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
-    tokio::task::spawn_blocking(|| {
+pub async fn discover_acp_providers(
+    app: tauri::AppHandle,
+) -> Result<Vec<AcpRuntimeCatalogEntry>, String> {
+    tokio::task::spawn_blocking(move || {
+        use tauri::Manager;
         crate::managed_agents::clear_resolve_cache();
         crate::managed_agents::refresh_login_shell_path();
-        crate::managed_agents::discover_acp_runtimes()
+        let custom_dir = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|d| d.join("custom_harnesses"));
+        crate::managed_agents::discover_acp_runtimes_from(custom_dir.as_deref())
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))
+}
+
+/// Write a user-defined harness definition to `<app-data>/custom_harnesses/<id>.json`.
+///
+/// Validates the definition (id regex, builtin-id collision, non-empty command
+/// and label, env well-formedness) before touching the filesystem. Returns the
+/// merged catalog entry so the UI can update the provider list without triggering
+/// a full re-discover.
+///
+/// Write a user-defined harness definition to `<app-data>/custom_harnesses/<id>.json`.
+///
+/// Validates the definition (id regex, builtin-id collision, non-empty command
+/// and label) before touching the filesystem. Returns the merged catalog entry
+/// so the UI can update the provider list without triggering a full re-discover.
+///
+/// `original_id` handles the rename case: when the user edits an existing
+/// harness and changes its id, pass the old id here so the old file is removed
+/// atomically as part of the write. If the id is unchanged or this is a new
+/// harness, omit `original_id` (or pass `None`).
+///
+/// The file is written using `atomic-write-file` (unique temp file + commit)
+/// so concurrent saves do not race on a fixed temp path, and a partial write
+/// never produces a corrupted JSON file.
+#[tauri::command]
+pub async fn save_custom_harness(
+    definition: crate::managed_agents::custom_harnesses::HarnessDefinition,
+    original_id: Option<String>,
+    app: tauri::AppHandle,
+) -> Result<AcpRuntimeCatalogEntry, String> {
+    use crate::managed_agents::{
+        custom_harnesses, AcpAvailabilityStatus, AuthStatus, HarnessSource,
+    };
+    use tauri::Manager;
+
+    // ── Phase 1: full validation before touching the filesystem ─────────────
+    // validate_harness_definition_pub now covers: id format, non-empty command/label,
+    // env key well-formedness + reserved-key check + NUL/size limits, and
+    // install_instructions_url scheme.
+    custom_harnesses::validate_harness_definition_pub(&definition)?;
+    custom_harnesses::check_id_collision(&definition.id)?;
+
+    // Validate original_id BEFORE any filesystem mutation (validate-before-mutate).
+    let rename_old_id: Option<String> = original_id.and_then(|oid| {
+        let oid = oid.trim().to_string();
+        if oid.is_empty() || oid == definition.id {
+            None
+        } else {
+            Some(oid)
+        }
+    });
+    if let Some(ref old_id) = rename_old_id {
+        custom_harnesses::check_id_collision(old_id)
+            .map_err(|_| format!("original_id {old_id:?} is a built-in and cannot be deleted"))?;
+        if !custom_harnesses::is_valid_harness_id_pub(old_id) {
+            return Err(format!("invalid original_id {old_id:?}"));
+        }
+    }
+
+    let custom_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app data dir: {e}"))?
+        .join("custom_harnesses");
+    std::fs::create_dir_all(&custom_dir)
+        .map_err(|e| format!("failed to create custom_harnesses dir: {e}"))?;
+
+    let target_path = custom_dir.join(format!("{}.json", definition.id));
+
+    // ── Phase 2: atomic write (Windows-safe) ────────────────────────────────
+    // `atomic-write-file` 0.3 uses a plain `fs::rename(temp, dest)` on
+    // non-Unix platforms.  On Windows `fs::rename` fails with "access denied"
+    // when `dest` already exists.  Pre-removing the target on Windows before
+    // committing makes same-ID edits safe; the window between remove and rename
+    // is tiny and the user-visible TOML data is already serialised in the temp
+    // file at that point.
+    let json = serde_json::to_string_pretty(&definition)
+        .map_err(|e| format!("failed to serialize harness definition: {e}"))?;
+
+    {
+        use atomic_write_file::AtomicWriteFile;
+        let mut file = AtomicWriteFile::open(&target_path)
+            .map_err(|e| format!("failed to open {}: {e}", target_path.display()))?;
+        std::io::Write::write_all(&mut file, json.as_bytes())
+            .map_err(|e| format!("failed to write harness definition: {e}"))?;
+        // On Windows, remove the destination before committing so `fs::rename`
+        // does not fail with "access denied" on an existing file.
+        #[cfg(windows)]
+        if target_path.exists() {
+            std::fs::remove_file(&target_path).map_err(|e| {
+                format!(
+                    "failed to remove existing {} before replace: {e}",
+                    target_path.display()
+                )
+            })?;
+        }
+        file.commit()
+            .map_err(|e| format!("failed to finalize harness definition: {e}"))?;
+    }
+
+    // ── Phase 3: remove old file on rename (after new file is committed) ────
+    if let Some(ref old_id) = rename_old_id {
+        let old_path = custom_dir.join(format!("{old_id}.json"));
+        if let Err(e) = std::fs::remove_file(&old_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                // New file is already committed.  Surface the error so the user
+                // knows the old file was not cleaned up, but do not abort — the
+                // new definition is already live and the registry re-warm below
+                // will make the new id resolvable.
+                tracing::warn!(
+                    "save_custom_harness: failed to remove old harness file {old_id:?}: {e}"
+                );
+            }
+        }
+    }
+
+    // Refresh the loaded-harness registry transactionally so a spawn/start
+    // immediately after save can resolve the new id without waiting for the
+    // next frontend-driven discover_acp_providers call.
+    custom_harnesses::warm_harness_registry_from_dir(Some(&custom_dir));
+
+    // Resolve availability for the returned catalog entry.
+    let (availability, command_opt, binary_path) =
+        match crate::managed_agents::find_command(&definition.command) {
+            Some(path) => (
+                AcpAvailabilityStatus::Available,
+                Some(definition.command.clone()),
+                Some(path.display().to_string()),
+            ),
+            None => (AcpAvailabilityStatus::NotInstalled, None, None),
+        };
+
+    let default_args =
+        crate::managed_agents::normalize_agent_args(&definition.command, definition.args.clone());
+
+    Ok(AcpRuntimeCatalogEntry {
+        id: definition.id,
+        label: definition.label,
+        // Security: no user-supplied avatar URL in catalog entries.
+        avatar_url: String::new(),
+        availability,
+        command: command_opt,
+        binary_path,
+        default_args,
+        mcp_command: None,
+        model_env_var: None,
+        provider_env_var: None,
+        thinking_env_var: None,
+        install_hint: definition.install_hint,
+        install_instructions_url: definition.install_instructions_url,
+        can_auto_install: false,
+        requires_external_cli: false,
+        underlying_cli_path: None,
+        node_required: false,
+        auth_status: AuthStatus::NotApplicable,
+        login_hint: None,
+        source: HarnessSource::Custom,
+        // Carry definition env back so the edit form can read and preserve it.
+        definition_env: definition.env,
+    })
+}
+
+/// Remove a user-defined harness definition from `<app-data>/custom_harnesses/`.
+///
+/// Only `source: custom` harnesses may be deleted. Attempting to delete a
+/// built-in id (goose, claude, codex, buzz-agent) returns an error without
+/// touching the filesystem.
+#[tauri::command]
+pub async fn delete_custom_harness(id: String, app: tauri::AppHandle) -> Result<(), String> {
+    use crate::managed_agents::custom_harnesses;
+    use tauri::Manager;
+
+    // Reject built-in ids early — they have no backing file to delete and
+    // must never be removable from the catalog.
+    custom_harnesses::check_id_collision(&id)
+        .map_err(|_| format!("harness {id:?} is a built-in and cannot be deleted"))?;
+
+    // Validate the id so callers cannot use path-traversal tricks.
+    if !custom_harnesses::is_valid_harness_id_pub(&id) {
+        return Err(format!("invalid harness id {id:?}"));
+    }
+
+    let custom_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("failed to resolve app data dir: {e}"))?
+        .join("custom_harnesses");
+
+    let target_path = custom_dir.join(format!("{id}.json"));
+
+    match std::fs::remove_file(&target_path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Idempotent: already gone is fine.
+        }
+        Err(e) => return Err(format!("failed to delete harness {id:?}: {e}")),
+    }
+
+    // Refresh the loaded-harness registry transactionally so the deleted id
+    // is immediately unresolvable, without waiting for the next frontend
+    // discover_acp_providers call.
+    custom_harnesses::warm_harness_registry_from_dir(Some(&custom_dir));
+
+    Ok(())
 }
 
 #[tauri::command]

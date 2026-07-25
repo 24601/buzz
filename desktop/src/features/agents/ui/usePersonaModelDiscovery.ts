@@ -204,6 +204,7 @@ export function usePersonaModelDiscovery({
   // abandon and re-issue an in-flight discovery IPC call.
   const selectedRuntimeAvailability = selectedRuntime?.availability;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
+  const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
     open &&
     modelFieldVisible &&
@@ -289,6 +290,7 @@ export function usePersonaModelDiscovery({
         agentArgs: selectedRuntimeDefaultArgs ?? [],
         provider: trimmedProvider || undefined,
         envVars,
+        definitionEnv: selectedRuntimeDefinitionEnv ?? {},
       })
         .then((response) => {
           if (modelDiscoveryRequestRef.current !== requestId) {
@@ -352,6 +354,7 @@ export function usePersonaModelDiscovery({
     modelDiscoveryKey,
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
+    selectedRuntimeDefinitionEnv,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);

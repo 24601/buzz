@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::managed_agents::{
     buzz_managed_command_path, buzz_managed_node_bin_dir, buzz_managed_npm_bin_dir,
     AcpAvailabilityStatus, AcpRuntimeCatalogEntry, AuthStatus, CommandAvailabilityInfo,
+    HarnessSource,
 };
 
 mod runtime_metadata;
@@ -286,6 +287,7 @@ pub fn default_agent_command() -> String {
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
 ///   2. the record's own `runtime` id mapped to its primary command —
 ///      records materialize their runtime at create/migration time;
+///      checks both static builtins AND the loaded preset/custom registry;
 ///   3. legacy fallback: the linked persona's `runtime` (records created
 ///      before the unified model carry `persona_id` but no `runtime`);
 ///   4. `default_agent_command()`.
@@ -302,13 +304,17 @@ pub fn record_agent_command(
         return pin.to_string();
     }
 
-    if let Some(command) = record
-        .runtime
-        .as_deref()
-        .and_then(known_acp_runtime_exact)
-        .and_then(|r| r.commands.first().copied())
-    {
-        return command.to_string();
+    if let Some(id) = record.runtime.as_deref() {
+        // Check static builtins first.
+        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
+        {
+            return command.to_string();
+        }
+        // Fall back to loaded registry for preset/custom harnesses.
+        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+        {
+            return def.command.clone();
+        }
     }
 
     effective_agent_command(record.persona_id.as_deref(), personas, None)
@@ -320,7 +326,8 @@ pub fn record_agent_command(
 ///
 /// Resolution order:
 ///   1. explicit override (non-empty) — a deliberate per-instance pin;
-///   2. the linked persona's `runtime` id mapped to its primary command;
+///   2. the linked persona's `runtime` id mapped to its primary command
+///      (checks builtins then loaded preset/custom registry);
 ///   3. `default_agent_command()` — no persona/runtime, or persona deleted.
 pub fn effective_agent_command(
     persona_id: Option<&str>,
@@ -334,17 +341,85 @@ pub fn effective_agent_command(
         return pin.to_string();
     }
 
-    persona_id
+    let runtime_id = persona_id
         .and_then(|pid| personas.iter().find(|p| p.id == pid))
-        .and_then(|persona| persona.runtime.as_deref())
-        .and_then(known_acp_runtime_exact)
-        .and_then(|r| r.commands.first().copied())
-        .map(str::to_string)
-        .unwrap_or_else(default_agent_command)
+        .and_then(|persona| persona.runtime.as_deref());
+
+    if let Some(id) = runtime_id {
+        // Check static builtins first.
+        if let Some(command) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
+        {
+            return command.to_string();
+        }
+        // Check loaded preset/custom registry.
+        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+        {
+            return def.command.clone();
+        }
+    }
+
+    default_agent_command()
 }
 
 mod overrides;
 pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
+
+/// Spawn-time variant of `record_agent_command` that returns a typed error when
+/// a record's `runtime` id or its persona's `runtime` id is set but cannot be
+/// resolved (i.e. the definition was deleted after the agent was created).
+///
+/// Returns `Err("DANGLING_HARNESS_ID:<id>")` so callers can surface the error
+/// without falling through to `buzz-agent`.  When there is no runtime id at all
+/// the fallback to `default_agent_command()` is intentional (legacy agents
+/// pre-date the unified harness model).
+pub fn try_record_agent_command(
+    record: &crate::managed_agents::types::ManagedAgentRecord,
+    personas: &[crate::managed_agents::types::AgentDefinition],
+) -> Result<String, String> {
+    // Explicit pin always wins — if the user set a raw override, honour it.
+    if let Some(pin) = record
+        .agent_command_override
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(pin.to_string());
+    }
+
+    // Record-level runtime id: if set but unresolvable → typed error.
+    if let Some(id) = record.runtime.as_deref() {
+        if let Some(cmd) = known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied()) {
+            return Ok(cmd.to_string());
+        }
+        if let Some(def) = crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+        {
+            return Ok(def.command.clone());
+        }
+        return Err(format!("DANGLING_HARNESS_ID:{id}"));
+    }
+
+    // Persona-level runtime id.
+    if let Some(persona_id) = record.persona_id.as_deref() {
+        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
+            if let Some(id) = persona.runtime.as_deref() {
+                if let Some(cmd) =
+                    known_acp_runtime_exact(id).and_then(|r| r.commands.first().copied())
+                {
+                    return Ok(cmd.to_string());
+                }
+                if let Some(def) =
+                    crate::managed_agents::custom_harnesses::lookup_loaded_harness_by_id(id)
+                {
+                    return Ok(def.command.clone());
+                }
+                return Err(format!("DANGLING_HARNESS_ID:{id}"));
+            }
+        }
+    }
+
+    // No runtime id set — legacy agent; use the safe default.
+    Ok(default_agent_command())
+}
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {
@@ -1269,6 +1344,9 @@ fn discover_acp_runtime_phase1(runtime: &'static KnownAcpRuntime) -> PartialEntr
             // Filled in by the auth-probe phase in full catalog discovery.
             auth_status: AuthStatus::Unknown,
             login_hint: None,
+            source: HarnessSource::Builtin,
+            // Builtin entries have no user-editable env; definition_env is empty.
+            definition_env: Default::default(),
         },
     }
 }
@@ -1283,8 +1361,146 @@ pub(crate) fn discover_acp_runtime_availability(runtime_id: &str) -> Option<AcpA
         .map(|partial| partial.entry.availability)
 }
 
-pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
-    // Phase 1: build all entries (fast — no probes yet).
+// ── Tier-2 preset harnesses ────────────────────────────────────────────────
+//
+// Static data for well-known ACP harnesses that have bundled logos and
+// verified command/args. PATH-probed at discovery time (Detected badge);
+// not editable or deletable by users. Logos are bundled assets referenced
+// by id in the frontend `RUNTIME_LOGOS` map.
+
+struct PresetHarness {
+    id: &'static str,
+    label: &'static str,
+    command: &'static str,
+    args: &'static [&'static str],
+    install_instructions_url: &'static str,
+    install_hint: &'static str,
+}
+
+const PRESET_HARNESSES: &[PresetHarness] = &[
+    PresetHarness {
+        id: "cursor",
+        label: "Cursor",
+        command: "cursor-agent",
+        args: &["acp"],
+        install_instructions_url: "https://cursor.com/downloads",
+        install_hint: "Install Cursor from cursor.com/downloads.",
+    },
+    PresetHarness {
+        id: "omp",
+        label: "Oh My Pi",
+        command: "omp",
+        args: &["acp"],
+        install_instructions_url: "https://github.com/can1357/oh-my-pi",
+        install_hint: "Install Oh My Pi from github.com/can1357/oh-my-pi.",
+    },
+    PresetHarness {
+        id: "grok",
+        label: "Grok Build",
+        command: "grok",
+        args: &["agent", "--always-approve", "stdio"],
+        install_instructions_url: "https://build.x.ai/docs",
+        install_hint: "Install Grok Build from build.x.ai.",
+    },
+    PresetHarness {
+        id: "opencode",
+        label: "OpenCode",
+        command: "opencode",
+        args: &["acp"],
+        install_instructions_url: "https://opencode.ai/docs",
+        install_hint: "Install OpenCode from opencode.ai/docs.",
+    },
+    PresetHarness {
+        id: "kimi",
+        label: "Kimi Code",
+        command: "kimi",
+        args: &["acp"],
+        install_instructions_url: "https://kimi.ai/download",
+        install_hint: "Install Kimi Code from kimi.ai/download.",
+    },
+    PresetHarness {
+        id: "amp",
+        label: "Amp",
+        command: "amp-acp",
+        args: &[],
+        install_instructions_url: "https://github.com/tao12345666333/amp-acp",
+        install_hint: "Install the amp-acp npm adapter: npm install -g amp-acp.",
+    },
+    PresetHarness {
+        id: "hermes",
+        label: "Hermes Agent",
+        command: "hermes-acp",
+        args: &[],
+        install_instructions_url: "https://hermes-agent.nousresearch.com",
+        install_hint: "Install Hermes Agent from hermes-agent.nousresearch.com.",
+    },
+    PresetHarness {
+        id: "openclaw",
+        label: "OpenClaw",
+        command: "openclaw",
+        args: &["acp"],
+        install_instructions_url: "https://docs.openclaw.ai/start/getting-started",
+        install_hint: "Install OpenClaw: npm install -g openclaw@latest.",
+    },
+];
+
+/// Return the static preset harness definitions as `HarnessDefinition` values.
+///
+/// Used by `warm_harness_registry_from_dir` to seed the loaded-harness registry
+/// at startup before the frontend triggers a full discovery run.
+pub(crate) fn preset_harness_definitions(
+) -> Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> {
+    PRESET_HARNESSES
+        .iter()
+        .map(
+            |p| crate::managed_agents::custom_harnesses::HarnessDefinition {
+                id: p.id.to_string(),
+                label: p.label.to_string(),
+                command: p.command.to_string(),
+                args: p.args.iter().map(|s| s.to_string()).collect(),
+                env: std::collections::BTreeMap::new(),
+                install_instructions_url: p.install_instructions_url.to_string(),
+                install_hint: p.install_hint.to_string(),
+            },
+        )
+        .collect()
+}
+
+/// Return the static slice of preset harness IDs.
+///
+/// Used by `check_id_collision` in `custom_harnesses` to derive the reserved-ID
+/// set from the single source of truth (`PRESET_HARNESSES`) rather than a
+/// hand-maintained copy.  Adding a preset automatically reserves its ID.
+pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
+    // SAFETY: `PRESET_HARNESSES` is `'static`; we project its `id` fields.
+    // Computed once via OnceLock to avoid repeated allocations on hot paths.
+    use std::sync::OnceLock;
+    static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
+    IDS.get_or_init(|| PRESET_HARNESSES.iter().map(|p| p.id).collect())
+        .as_slice()
+}
+
+/// Discover all ACP runtimes, optionally merging user-defined custom harnesses
+/// from `custom_harnesses_dir`.
+///
+/// This is the primary entry point used by the Tauri command layer. It:
+/// 1. Builds entries for all compiled-in (`Builtin`) runtimes.
+/// 2. Runs auth probes in parallel.
+/// 3. Inserts static `Preset` entries (PATH-probed, `source: Preset`).
+/// 4. If `custom_harnesses_dir` is `Some`, loads `*.json` files from that
+///    directory and appends `Custom` entries — no auth probe, command resolved
+///    via PATH, availability is `Available` or `NotInstalled`.
+///
+/// The custom dir is re-scanned on every call (goose `refresh_custom_providers`
+/// pattern) — no caching, no restart needed to pick up new files.
+///
+/// After building the catalog, updates the loaded-harness registry so spawn
+/// and readiness paths can resolve preset/custom harness commands without
+/// re-running discovery.
+pub fn discover_acp_runtimes_from(
+    custom_harnesses_dir: Option<&Path>,
+) -> Vec<AcpRuntimeCatalogEntry> {
+    // Phase 1: build all builtin entries (fast — no probes yet).
     let mut partials: Vec<PartialEntry> = KNOWN_ACP_RUNTIMES
         .iter()
         .map(discover_acp_runtime_phase1)
@@ -1339,7 +1555,145 @@ pub fn discover_acp_runtimes() -> Vec<AcpRuntimeCatalogEntry> {
         }
     }
 
-    partials.into_iter().map(|p| p.entry).collect()
+    let mut entries: Vec<AcpRuntimeCatalogEntry> = partials.into_iter().map(|p| p.entry).collect();
+
+    // Track all ids seen so far (builtins) to prevent preset/custom collisions.
+    let mut seen_ids: std::collections::HashSet<String> =
+        entries.iter().map(|e| e.id.clone()).collect();
+
+    // Loaded (non-builtin) definitions collected for the registry.
+    let mut loaded_defs: Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> =
+        Vec::new();
+
+    // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
+    for def in PRESET_HARNESSES {
+        if seen_ids.contains(def.id) {
+            // Builtin or earlier preset shadowed this id — skip silently.
+            continue;
+        }
+        seen_ids.insert(def.id.to_string());
+
+        let (availability, command, binary_path) = match find_command(def.command) {
+            Some(path) => (
+                AcpAvailabilityStatus::Available,
+                Some(def.command.to_string()),
+                Some(path.display().to_string()),
+            ),
+            None => (AcpAvailabilityStatus::NotInstalled, None, None),
+        };
+
+        let default_args = normalize_agent_args(
+            def.command,
+            def.args.iter().map(|s| s.to_string()).collect(),
+        );
+
+        entries.push(AcpRuntimeCatalogEntry {
+            id: def.id.to_string(),
+            label: def.label.to_string(),
+            // No remote URL — all preset icons are bundled assets.
+            avatar_url: String::new(),
+            availability,
+            command,
+            binary_path,
+            default_args,
+            mcp_command: None,
+            model_env_var: None,
+            provider_env_var: None,
+            thinking_env_var: None,
+            install_hint: def.install_hint.to_string(),
+            install_instructions_url: def.install_instructions_url.to_string(),
+            can_auto_install: false,
+            requires_external_cli: false,
+            underlying_cli_path: None,
+            node_required: false,
+            auth_status: AuthStatus::NotApplicable,
+            login_hint: None,
+            source: HarnessSource::Preset,
+            // Preset entries have static, non-editable env; definition_env is empty.
+            definition_env: Default::default(),
+        });
+
+        // Register for spawn-time resolution.
+        loaded_defs.push(crate::managed_agents::custom_harnesses::HarnessDefinition {
+            id: def.id.to_string(),
+            label: def.label.to_string(),
+            command: def.command.to_string(),
+            args: def.args.iter().map(|s| s.to_string()).collect(),
+            env: Default::default(),
+            install_instructions_url: def.install_instructions_url.to_string(),
+            install_hint: def.install_hint.to_string(),
+        });
+    }
+
+    // Phase 3: load and append custom harness definitions.
+    if let Some(dir) = custom_harnesses_dir {
+        for def in crate::managed_agents::custom_harnesses::load_custom_harnesses(dir) {
+            // Collision check: a custom file must not shadow a built-in or preset id.
+            if let Err(reason) =
+                crate::managed_agents::custom_harnesses::check_id_collision(&def.id)
+            {
+                tracing::warn!("custom_harnesses: skipping {}: {reason}", def.id);
+                continue;
+            }
+            // Reject duplicates within the custom set itself or against presets.
+            if !seen_ids.insert(def.id.clone()) {
+                tracing::warn!("custom_harnesses: skipping duplicate id {:?}", def.id);
+                continue;
+            }
+
+            // Availability: command on PATH → Available, else NotInstalled.
+            let (availability, command, binary_path) = match find_command(&def.command) {
+                Some(path) => (
+                    AcpAvailabilityStatus::Available,
+                    Some(def.command.clone()),
+                    Some(path.display().to_string()),
+                ),
+                None => (AcpAvailabilityStatus::NotInstalled, None, None),
+            };
+
+            let default_args = normalize_agent_args(&def.command, def.args.clone());
+
+            entries.push(AcpRuntimeCatalogEntry {
+                id: def.id.clone(),
+                label: def.label.clone(),
+                // F1 security fix: never copy user-supplied avatar URL into the catalog.
+                // All icons are bundled assets; customs fall back to TerminalSquare in the UI.
+                avatar_url: String::new(),
+                availability,
+                command,
+                binary_path,
+                default_args,
+                // Custom harnesses are plain ACP — no MCP sidecar, no env-var
+                // model switching, no thinking knobs.
+                mcp_command: None,
+                model_env_var: None,
+                provider_env_var: None,
+                thinking_env_var: None,
+                install_hint: def.install_hint.clone(),
+                install_instructions_url: def.install_instructions_url.clone(),
+                // Security line: custom definitions carry no install scripts.
+                can_auto_install: false,
+                requires_external_cli: false,
+                underlying_cli_path: None,
+                node_required: false,
+                // No auth probe for custom harnesses.
+                auth_status: AuthStatus::NotApplicable,
+                login_hint: None,
+                source: HarnessSource::Custom,
+                // Carry definition env into the catalog so the edit form can
+                // read it back — prevents silently erasing env on save.
+                definition_env: def.env.clone(),
+            });
+
+            loaded_defs.push(def);
+        }
+    }
+
+    // Populate the loaded registry so spawn, readiness, and summary paths can
+    // resolve custom/preset harness commands without re-running discovery.
+    crate::managed_agents::custom_harnesses::update_loaded_harness_registry(loaded_defs);
+
+    entries
 }
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
