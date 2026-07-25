@@ -337,7 +337,10 @@ const overrides = new Map([
   // +29: rebase over main (#2680) — discover_acp_runtime_phase1 extracted
   // helper + discover_acp_runtime_availability; both load-bearing for
   // post-install verification. Semantic composition with BYOH changes.
-  ["src-tauri/src/managed_agents/discovery.rs", 1715],
+  // +17: merge of main (#2767) — codex_adapter_is_outdated_with_path split out
+  // so Codex adapter planning takes an explicit PATH. Auto-merged cleanly; only
+  // the ceiling needed composing with the BYOH growth above.
+  ["src-tauri/src/managed_agents/discovery.rs", 1732],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -563,7 +566,10 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  ["src-tauri/src/commands/agent_discovery.rs", 2038],
+  // +10: merge of main (#2767) — pass an explicit PATH through Codex adapter
+  // install planning so unit tests avoid the process-global login-shell PATH
+  // cache. Independent of the BYOH growth above; the two deltas compose.
+  ["src-tauri/src/commands/agent_discovery.rs", 2048],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
