@@ -84,6 +84,15 @@ pub struct MeshServeTarget {
     pub model_id: String,
     pub model_name: Option<String>,
     pub endpoint_addr: String,
+    /// Buzz member that signed the discovery note containing this target.
+    /// Populated after signature/membership validation; never trusted from the
+    /// note payload itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter_pubkey: Option<String>,
+    /// Per-runtime MeshLLM owner identity verified by the signed Buzz status.
+    /// Distinguishes two devices logged into the same Buzz member account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_id: Option<String>,
     pub node_name: Option<String>,
     pub capacity: Option<MeshTargetCapacity>,
     #[serde(default)]
@@ -184,6 +193,10 @@ pub struct StartMeshNodeRequest {
     pub max_vram_gb: Option<u64>,
     #[serde(default)]
     pub join_token: Option<String>,
+    /// Stable, relay-scoped mesh name injected by the Buzz backend. It is not
+    /// accepted from the frontend and contains no relay address.
+    #[serde(default, skip_deserializing)]
+    pub mesh_name: Option<String>,
     /// Mesh owner ids admitted to this node (the member roster from
     /// member-signed discovery notes). `None` = caller did not resolve a roster
     /// (tests, direct invocations): the node runs without allowlist
@@ -245,6 +258,7 @@ pub struct MeshServingUsage {
     pub peers: u64,
 }
 
+#[cfg(test)]
 impl MeshServingUsage {
     /// True when at least one request has been served for a non-local consumer.
     #[cfg(test)]
@@ -423,6 +437,9 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_STARTUP_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -460,6 +477,9 @@ impl DesktopMeshRuntime {
                     .discovery_mode(MeshDiscoveryMode::Nostr)
                     .startup_timeout(MESH_CLIENT_MANAGEMENT_TIMEOUT)
                     .console_ui(true);
+                if let Some(mesh_name) = request.mesh_name.as_deref() {
+                    builder = builder.mesh_name(mesh_name);
+                }
                 builder = match iroh_relay_mode()? {
                     IrohRelayMode::Disabled => builder.disable_iroh_relays(true),
                     IrohRelayMode::Default => builder.disable_iroh_relays(false),
@@ -646,6 +666,8 @@ impl DesktopMeshRuntime {
                     model_id: model.id,
                     model_name: model.name,
                     endpoint_addr: endpoint_addr.clone(),
+                    reporter_pubkey: None,
+                    owner_id: None,
                     node_name: payload
                         .get("node_id")
                         .and_then(serde_json::Value::as_str)

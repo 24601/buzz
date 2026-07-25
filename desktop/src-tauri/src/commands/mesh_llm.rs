@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, State};
 
 use crate::{app_state::AppState, mesh_llm, relay};
@@ -58,6 +59,16 @@ fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
 }
 
 pub type CmdResult<T> = Result<T, String>;
+
+fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
+    let normalized = relay_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let digest = hex::encode(Sha256::digest(normalized.as_bytes()));
+    format!("buzz-community-{}", &digest[..32])
+}
+
+fn buzz_mesh_name(state: &AppState) -> String {
+    buzz_mesh_name_for_relay(&relay::relay_ws_url_with_override(state))
+}
 
 fn advance_mesh_status_cursor(
     filter: &mut serde_json::Value,
@@ -137,6 +148,81 @@ pub(crate) async fn resolve_trusted_owner_ids_or_self_only(state: &AppState) -> 
     }
 }
 
+/// Choose validated live endpoints from other runtimes in this Buzz community.
+/// The stable relay-derived mesh name gives every runtime the same MeshLLM mesh
+/// identity; these endpoints supply transport bootstrap only.
+fn buzz_mesh_join_targets(
+    mut targets: Vec<mesh_llm::MeshServeTarget>,
+    self_owner_id: &str,
+) -> Vec<mesh_llm::MeshServeTarget> {
+    targets.retain(|target| {
+        target.reporter_pubkey.is_some()
+            && target
+                .owner_id
+                .as_deref()
+                .is_some_and(|owner| !owner.eq_ignore_ascii_case(self_owner_id.trim()))
+    });
+    targets.sort_by(|left, right| {
+        left.reporter_pubkey
+            .cmp(&right.reporter_pubkey)
+            .then_with(|| left.owner_id.cmp(&right.owner_id))
+            .then_with(|| left.endpoint_id.cmp(&right.endpoint_id))
+            .then_with(|| left.endpoint_addr.cmp(&right.endpoint_addr))
+            .then_with(|| left.model_id.cmp(&right.model_id))
+    });
+    targets.dedup_by(|left, right| left.endpoint_addr == right.endpoint_addr);
+    targets
+}
+
+/// Resolve the validated member endpoint this runtime should join to enter the
+/// existing Buzz community mesh. `Ok(None)` means this machine is the first
+/// live serving member (or is itself the shared bootstrap contact).
+pub(crate) async fn resolve_buzz_mesh_join_targets(
+    state: &AppState,
+) -> Result<Vec<mesh_llm::MeshServeTarget>, String> {
+    let events = query_mesh_discovery_events(state).await?;
+    let self_owner_id = mesh_llm::ensure_owner_identity()
+        .map_err(|error| format!("failed to load mesh owner identity: {error}"))?
+        .owner_id;
+    Ok(buzz_mesh_join_targets(
+        mesh_llm::availability_from_events(events).serve_targets,
+        &self_owner_id,
+    ))
+}
+
+/// Resolve the initial admission roster and bootstrap endpoint from one relay
+/// snapshot. A node start used to repeat the full membership + status query
+/// for each value, making Share Compute startup both slower and more exposed
+/// to inconsistent snapshots.
+async fn resolve_buzz_mesh_startup(state: &AppState) -> (Vec<String>, Option<String>) {
+    match query_mesh_discovery_events(state).await {
+        Ok(events) => {
+            let trusted_owner_ids = mesh_llm::owner_ids_from_events(&events);
+            let join_token = mesh_llm::ensure_owner_identity()
+                .ok()
+                .and_then(|identity| {
+                    buzz_mesh_join_targets(
+                        mesh_llm::availability_from_events(events).serve_targets,
+                        &identity.owner_id,
+                    )
+                    .into_iter()
+                    .next()
+                })
+                .map(|target| target.endpoint_addr);
+            (trusted_owner_ids, join_token)
+        }
+        Err(error) => {
+            // Initial startup fails closed to this runtime's own owner. Share
+            // Compute must still start for the first member and through a
+            // transient relay outage; the coordinator retries convergence.
+            eprintln!(
+                "buzz-mesh: startup discovery failed; allowing only this node and starting isolated for now: {error}"
+            );
+            (Vec::new(), None)
+        }
+    }
+}
+
 pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> CmdResult<()> {
     let Some(config) = load_mesh_sharing_config(app)? else {
         return Ok(());
@@ -144,6 +230,10 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
     if !config.enabled || config.model_id.trim().is_empty() {
         return Ok(());
     }
+    if state.mesh_llm_runtime.lock().await.is_some() {
+        return Ok(());
+    }
+    let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(state).await;
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
         return Ok(());
@@ -152,8 +242,9 @@ pub(crate) async fn restore_mesh_sharing(app: &AppHandle, state: &AppState) -> C
         mode: mesh_llm::MeshNodeMode::Serve,
         model_id: Some(config.model_id),
         max_vram_gb: config.max_vram_gb,
-        join_token: None,
-        trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
+        join_token,
+        mesh_name: Some(buzz_mesh_name(state)),
+        trusted_owner_ids: Some(trusted_owner_ids),
     };
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
@@ -170,11 +261,16 @@ pub async fn mesh_start_node(
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
-    // Frontend requests never carry a roster; resolve it here so every
-    // UI-started node enforces the member allowlist.
-    if request.trusted_owner_ids.is_none() {
-        request.trusted_owner_ids = Some(resolve_trusted_owner_ids_or_self_only(&state).await);
+    // Frontend requests never carry a roster. Resolve it and the bootstrap
+    // endpoint from one snapshot so UI startup does not repeat relay probes.
+    if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
+        let (trusted_owner_ids, join_token) = resolve_buzz_mesh_startup(&state).await;
+        request.trusted_owner_ids.get_or_insert(trusted_owner_ids);
+        if request.join_token.is_none() {
+            request.join_token = join_token;
+        }
     }
+    request.mesh_name = Some(buzz_mesh_name(&state));
     let mut runtime = state.mesh_llm_runtime.lock().await;
     if runtime.is_some() {
         return Err("mesh node is already running".to_string());
@@ -399,6 +495,7 @@ pub(crate) async fn ensure_client_node_for_model(
         model_id: None,
         max_vram_gb: None,
         join_token: Some(join_token),
+        mesh_name: Some(buzz_mesh_name(state)),
         trusted_owner_ids: Some(resolve_trusted_owner_ids_or_self_only(state).await),
     };
     let mut runtime = state.mesh_llm_runtime.lock().await;
@@ -653,12 +750,106 @@ mod tests {
             model_id: model_id.to_string(),
             model_name: None,
             endpoint_addr: endpoint_addr.to_string(),
+            reporter_pubkey: None,
+            owner_id: None,
             node_name: None,
             capacity: None,
             endpoint_id: None,
             device_id: None,
             device_name: None,
         }
+    }
+
+    fn reported_target(
+        reporter_pubkey: &str,
+        model_id: &str,
+        endpoint_addr: &str,
+    ) -> mesh_llm::MeshServeTarget {
+        let mut target = target(model_id, endpoint_addr);
+        target.reporter_pubkey = Some(reporter_pubkey.to_string());
+        target.owner_id = Some(reporter_pubkey.to_string());
+        target
+    }
+
+    #[test]
+    fn buzz_mesh_join_uses_the_same_live_member_from_every_other_node() {
+        let targets = vec![
+            reported_target("member-c", "model-c", "addr-c"),
+            reported_target("member-a", "model-a", "addr-a"),
+            reported_target("member-b", "model-b", "addr-b"),
+        ];
+
+        assert_eq!(
+            buzz_mesh_join_targets(targets.clone(), "member-b")
+                .into_iter()
+                .next()
+                .map(|target| target.endpoint_addr),
+            Some("addr-a".to_string())
+        );
+        assert_eq!(
+            buzz_mesh_join_targets(targets, "member-c")
+                .into_iter()
+                .next()
+                .map(|target| target.endpoint_addr),
+            Some("addr-a".to_string())
+        );
+    }
+
+    #[test]
+    fn buzz_mesh_bootstrap_member_does_not_dial_itself() {
+        let targets = vec![
+            reported_target("member-b", "model-b", "addr-b"),
+            reported_target("member-a", "model-a", "addr-a"),
+        ];
+
+        assert_eq!(
+            buzz_mesh_join_targets(targets, "MEMBER-A")
+                .into_iter()
+                .next(),
+            Some(reported_target("member-b", "model-b", "addr-b"))
+        );
+    }
+
+    #[test]
+    fn buzz_mesh_join_ignores_targets_without_a_validated_reporter() {
+        let targets = vec![
+            target("unbound-model", "unbound-addr"),
+            reported_target("member-b", "model-b", "addr-b"),
+        ];
+
+        assert_eq!(
+            buzz_mesh_join_targets(targets, "member-c")
+                .into_iter()
+                .next()
+                .map(|target| target.endpoint_addr),
+            Some("addr-b".to_string())
+        );
+    }
+
+    #[test]
+    fn buzz_mesh_join_keeps_other_device_with_the_same_member_key() {
+        let mut self_target = reported_target("same-member", "model-a", "self-addr");
+        self_target.owner_id = Some("owner-self".to_string());
+        let mut other_device = reported_target("same-member", "model-b", "other-addr");
+        other_device.owner_id = Some("owner-other".to_string());
+
+        assert_eq!(
+            buzz_mesh_join_targets(vec![self_target, other_device], "owner-self")
+                .into_iter()
+                .next()
+                .map(|target| target.endpoint_addr),
+            Some("other-addr".to_string())
+        );
+    }
+
+    #[test]
+    fn buzz_mesh_name_is_stable_and_does_not_expose_the_relay() {
+        let first = buzz_mesh_name_for_relay("WSS://EXAMPLE.COM/");
+        let second = buzz_mesh_name_for_relay("wss://example.com");
+
+        assert_eq!(first, second);
+        assert!(first.starts_with("buzz-community-"));
+        assert!(!first.contains("example"));
     }
 
     #[test]
@@ -863,6 +1054,7 @@ mod tests {
                             model_id: Some(HOSTED_MODEL.to_string()),
                             max_vram_gb: None,
                             join_token: None,
+                            mesh_name: None,
                             trusted_owner_ids: None,
                         })
                         .await
