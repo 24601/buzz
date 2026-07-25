@@ -19,9 +19,8 @@ const RUNTIME_LOGOS: Record<string, string> = {
 // Public-path logos for bundled presets. Served from /harness-logos/ at runtime.
 // Keys match the preset `id` values emitted by the backend PRESET_HARNESSES.
 export const PRESET_LOGOS: Record<string, string> = {
-  cursor: "/harness-logos/cursor.png",
-  omp: "/harness-logos/omp.png",
-  grok: "/harness-logos/grok.png",
+  omp: "/harness-logos/omp.svg",
+  grok: "/harness-logos/grok.svg",
   opencode: "/harness-logos/opencode.svg",
   kimi: "/harness-logos/kimi.png",
   amp: "/harness-logos/amp.png",
@@ -55,8 +54,9 @@ export function RuntimeIcon({
   const { isDark } = useTheme();
   // Only use bundled logo maps — never render user-supplied avatar URLs for
   // custom/preset entries (tracking pixel / spoofing vector, security line).
+  const id = runtime.id.trim().toLowerCase();
   const imageUrl = getRuntimeLogoUrl(runtime);
-  const shouldForceForegroundColor = !imageUrl && runtime.id === "goose";
+  const shouldForceForegroundColor = !imageUrl && id === "goose";
 
   if (isBuzzRuntime(runtime)) {
     return <BuzzMark className="h-7 w-10 text-foreground" />;
@@ -69,6 +69,8 @@ export function RuntimeIcon({
         className={cn(
           "rounded-md object-contain",
           className,
+          id === "omp" && "bg-[#0d0d0d] p-1",
+          id === "grok" && "bg-white p-1",
           shouldForceForegroundColor &&
             (isDark ? "brightness-0 invert" : "brightness-0"),
         )}
