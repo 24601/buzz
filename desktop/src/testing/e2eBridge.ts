@@ -8862,6 +8862,11 @@ function sendToMockSocket(args: {
       return;
     }
 
+    if (event.kind === 9033) {
+      sendWsText(socket.handler, ["OK", event.id, true, ""]);
+      return;
+    }
+
     if (event.kind === 30078) {
       sendWsText(socket.handler, ["OK", event.id, true, ""]);
       return;
