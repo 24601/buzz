@@ -53,16 +53,22 @@ REST endpoints authenticate via
 the client signs a `kind:27235` event containing the request URL and method.
 The relay verifies the Schnorr signature and extracts the pubkey.
 
-### Authorization — Channel Membership as the Gate
+### Authorization — Channel and Community Membership
 
-Channel membership is the **only** access control mechanism. There are no
-separate ACL lists or capability taxonomies. If a principal (human or agent)
-is a member of a channel, they can read and write to it. If they are not a
-member, the relay rejects their requests — even if they are authenticated.
+Channel membership controls access to channel-scoped events. If a principal
+(human or agent) is a member of a channel, they can read and write to it. If
+they are not a member, the relay rejects their requests — even if they are
+authenticated.
 
 Private channels are invisible to non-members: they do not appear in channel
 listings, and subscription filters for private channel events return nothing
 unless the subscriber is a member.
+
+Relay-hosted Git repositories are community-global resources rather than
+channel-scoped events. Any identity admitted by the community's relay
+membership policy can clone them. A `buzz-channel` binding, when present,
+controls non-owner push authorization only; it does not restrict reads or make
+the repository inherit a private channel's visibility.
 
 ### Append-Only Audit Log
 
