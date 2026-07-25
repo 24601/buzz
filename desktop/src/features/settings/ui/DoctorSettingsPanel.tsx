@@ -57,6 +57,13 @@ const RUNTIME_SORT_PRIORITY: Record<string, number> = {
   goose: 1,
 };
 
+function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
+  return runtime.availability === "adapter_missing" ||
+    runtime.availability === "adapter_outdated"
+    ? "Adapter install guide"
+    : "CLI setup guide";
+}
+
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
   const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
 
@@ -135,7 +142,7 @@ function RuntimeOverflowMenu({
             onSelect={() => void openUrl(runtime.installInstructionsUrl)}
           >
             <ExternalLink className="h-4 w-4" />
-            Instructions
+            {runtimeInstallGuideLabel(runtime)}
           </DropdownMenuItem>
         ) : null}
       </DropdownMenuContent>
@@ -146,7 +153,6 @@ function RuntimeOverflowMenu({
 function RuntimeActions({
   authMethods,
   connectingMethodId,
-  installSuccess,
   isConnecting,
   isInstalling,
   onConnect,
@@ -155,7 +161,6 @@ function RuntimeActions({
 }: {
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
-  installSuccess: boolean;
   isConnecting: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
@@ -165,8 +170,7 @@ function RuntimeActions({
   const isAvailable = runtime.availability === "available";
   const canInstall = runtime.canAutoInstall && !runtime.nodeRequired;
   const isEnabled = useAcpRuntimeEnabled(runtime.id);
-  const isInstalled = isAvailable || installSuccess;
-  const isOn = isInstalled && isEnabled;
+  const isOn = isAvailable && isEnabled;
   const isWorking = isInstalling || isConnecting;
 
   return (
@@ -191,10 +195,10 @@ function RuntimeActions({
           aria-label={`${runtime.label} enabled`}
           checked={isOn}
           data-testid={`doctor-runtime-toggle-${runtime.id}`}
-          disabled={!isInstalled && !canInstall}
+          disabled={!isAvailable && !canInstall}
           onCheckedChange={(checked) => {
             setAcpRuntimeEnabled(runtime.id, checked);
-            if (checked && !isInstalled) {
+            if (checked && !isAvailable) {
               onInstall();
             }
           }}
@@ -212,7 +216,8 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
         ? "Adapter needed"
         : runtime.availability === "adapter_outdated"
           ? "Update needed"
-          : runtime.availability === "cli_missing"
+          : runtime.availability === "cli_missing" ||
+              runtime.availability === "not_installed"
             ? "CLI needed"
             : null;
 
@@ -245,7 +250,6 @@ function RuntimeStatusChip({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
 function RuntimeHeader({
   authMethods,
   connectingMethodId,
-  installSuccess,
   isConnecting,
   isInstalling,
   onConnect,
@@ -254,7 +258,6 @@ function RuntimeHeader({
 }: {
   authMethods: AcpAuthMethod[];
   connectingMethodId: string | null;
-  installSuccess: boolean;
   isConnecting: boolean;
   isInstalling: boolean;
   onConnect: (method: AcpAuthMethod) => void;
@@ -273,7 +276,6 @@ function RuntimeHeader({
       <RuntimeActions
         authMethods={authMethods}
         connectingMethodId={connectingMethodId}
-        installSuccess={installSuccess}
         isConnecting={isConnecting}
         isInstalling={isInstalling}
         onConnect={onConnect}
@@ -311,7 +313,6 @@ function RuntimeRow({
   }, [resetEpoch]);
   const isInstalling = installMutation.isPending;
   const installError = installResult?.error ?? null;
-  const installSuccess = installResult?.success ?? false;
 
   function handleInstall() {
     setInstallResult(null);
@@ -368,7 +369,6 @@ function RuntimeRow({
         <RuntimeHeader
           authMethods={authMethods}
           connectingMethodId={connectMutation.variables?.methodId ?? null}
-          installSuccess={installSuccess}
           isConnecting={connectMutation.isPending}
           isInstalling={isInstalling}
           onConnect={(method) => {
@@ -397,6 +397,25 @@ function RuntimeRow({
           runtime={runtime}
         />
 
+        {runtime.availability !== "available" ? (
+          <div
+            className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-muted-foreground"
+            data-testid={`doctor-runtime-guidance-${runtime.id}`}
+          >
+            <p>{runtime.installHint}</p>
+            {runtime.installInstructionsUrl.trim().length > 0 ? (
+              <button
+                className="inline-flex shrink-0 items-center gap-1 underline-offset-2 hover:text-foreground hover:underline"
+                onClick={() => void openUrl(runtime.installInstructionsUrl)}
+                type="button"
+              >
+                <ExternalLink className="h-4 w-4" />
+                {runtimeInstallGuideLabel(runtime)}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+
         {runtime.authStatus.status === "config_invalid" ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
@@ -406,11 +425,6 @@ function RuntimeRow({
           </p>
         ) : null}
 
-        {installSuccess && runtime.availability !== "available" ? (
-          <p className="mt-2 rounded-lg border border-green-500/30 bg-green-500/10 px-3 py-1.5 text-sm text-green-700 dark:text-green-400">
-            {runtime.label} installed. Checking for sign-in options...
-          </p>
-        ) : null}
         {installError ? (
           <p
             className="mt-2 whitespace-pre-line rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-sm text-destructive"
