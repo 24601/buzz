@@ -457,12 +457,12 @@ const overrides = new Map([
   // extraction and its regression tests.
   // +4 (1101 -> 1105): rebase onto agents-everywhere — agents.rs function
   // signatures updated for ManagedAgentRuntimeKey-keyed runtimes map.
-  // +36 (1113 -> 1149): OpenRouter discovery call sites + module delegation
+  // +32 (1113 -> 1145): OpenRouter discovery call sites + module delegation
   // (bulk logic lives in agent_models_openrouter.rs), OpenRouter B5 test
   // imports, and draft_agent_model_discovery_env extracted so
   // discover_agent_models's provider/env derivation is a tested pure function
   // (Thufir T4 finding — unsaved-agent discovery had no seam to exercise).
-  ["src-tauri/src/commands/agent_models.rs", 1149],
+  ["src-tauri/src/commands/agent_models.rs", 1145],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
