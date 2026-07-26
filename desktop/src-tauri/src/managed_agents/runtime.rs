@@ -1988,7 +1988,7 @@ pub fn spawn_agent_child(
     // never be GUI-overridable.
     // global < live persona < agent (last-wins on collision at each layer).
     let persona_over_global = super::env_vars::merged_user_env(
-        &global.env_vars,
+        &super::global_config::global_env_vars_for_record(record, &personas, &global),
         &super::env_vars::live_persona_env(&personas, record.persona_id.as_deref()),
     );
     for (key, value) in super::env_vars::merged_user_env(&persona_over_global, &record.env_vars) {
