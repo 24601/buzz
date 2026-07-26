@@ -699,7 +699,34 @@ has `/usr/lib/x86_64-linux-gnu/libstdc++.so -> libstdc++.so.6`; if a
 
 Agent-safe checks work fully headless: `just mobile-check` / `flutter analyze`
 (clean) and `flutter test` (~666 tests pass). Per this file's rules, agents do
-**not** run `flutter run`/`flutter build`. Running the actual mobile UI is a
-hardware limitation, not a rule one: the iOS simulator is macOS-only (impossible
-on this Linux VM), and an Android emulator needs `/dev/kvm`, which is **absent**
-here (`ls /dev/kvm` fails). So mobile verification = `analyze` + `test`.
+**not** run `flutter run`/`flutter build` for routine work — use those checks.
+
+**Device UI, though, is not fully blocked.** iOS is macOS-only (impossible here)
+and an Android emulator needs `/dev/kvm` (absent — `ls /dev/kvm` fails), but the
+Flutter **Linux desktop** target *does* build and run against `DISPLAY=:1`, and
+`flutter devices` already lists "Linux (desktop)". The snapshot has the needed
+toolchain (`clang`, `lld`, `llvm-18`, `libstdc++-13-dev`, `ninja-build`, `cmake`,
+`gnome-keyring`, `dbus-x11`). To reproduce a real running app for
+screenshots/video (the `mobile/linux` scaffold is intentionally NOT committed —
+Linux is not a product target, so regenerate it throwaway and delete it after):
+
+```bash
+cd mobile
+flutter create --platforms=linux .            # throwaway scaffold; do NOT commit
+# native-asset C++ build (mobile_scanner) needs the libstdc++ headers on clang:
+export CPLUS_INCLUDE_PATH=/usr/include/c++/13:/usr/include/x86_64-linux-gnu/c++/13
+flutter build linux --debug
+# run with an unlocked keyring so flutter_secure_storage can init identity:
+DISPLAY=:1 LIBGL_ALWAYS_SOFTWARE=1 dbus-run-session -- bash -c \
+  'eval "$(printf "x\n" | gnome-keyring-daemon --unlock --components=secrets,ssh)"; \
+   export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK; \
+   ./build/linux/x64/debug/bundle/buzz'
+git checkout -- .metadata && rm -rf linux       # revert the scaffold when done
+```
+
+The app renders its real pairing screen ("Welcome to Buzz — Scan the QR code …
+or paste a pairing code"). Caveats on Linux desktop: mobile-only plugins have no
+Linux implementation — `mobile_scanner`/`camera` (so QR *scanning* is dead; use
+the paste-pairing-code path), `video_player`, `image_picker`, and
+`app_badge_plus` (logs a harmless `MissingPluginException`). Without an unlocked
+keyring the app hangs on a spinner at `libsecret KeyringLocked`.
