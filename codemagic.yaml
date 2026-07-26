@@ -5,6 +5,10 @@
 # publishes the video + screenshots as build artifacts. Also runs the Flutter
 # unit/widget test suite. Trigger via the Codemagic REST API with
 # workflowId "ios-simulator-e2e".
+#
+# Artifacts are written to `$CM_BUILD_DIR/artifacts` (the clone root) and the
+# artifact globs below are resolved relative to the clone root, so they match
+# regardless of each script's working directory.
 workflows:
   ios-simulator-e2e:
     name: iOS Simulator E2E (video)
@@ -14,21 +18,21 @@ workflows:
       flutter: 3.41.7
       xcode: latest
       cocoapods: default
-    working_directory: mobile
     scripts:
       - name: Toolchain versions
         script: |
           flutter --version
           xcodebuild -version
       - name: Flutter pub get
-        script: flutter pub get
+        script: cd "$CM_BUILD_DIR/mobile" && flutter pub get
       - name: Build app for iOS Simulator (no codesign needed)
-        script: flutter build ios --simulator --debug
+        script: cd "$CM_BUILD_DIR/mobile" && flutter build ios --simulator --debug
       - name: Boot simulator, record video, launch + drive app
         script: |
           # NOTE: no `pipefail` — `... | head` triggers SIGPIPE upstream and
           # would abort under pipefail. Be defensive with `|| true` instead.
           set -u
+          cd "$CM_BUILD_DIR/mobile"
           ART="$CM_BUILD_DIR/artifacts"
           mkdir -p "$ART"
 
@@ -75,6 +79,7 @@ workflows:
           test -s "$ART/ios_app.mp4"
       - name: Flutter unit/widget tests
         script: |
+          cd "$CM_BUILD_DIR/mobile"
           flutter test 2>&1 | tee "$CM_BUILD_DIR/artifacts/flutter-test.log"
     artifacts:
       - artifacts/*.mp4
