@@ -53,7 +53,7 @@ OPENAI_COMPAT_BASE_URL=https://api.openai.com/v1 \
 # Or OpenRouter
 BUZZ_AGENT_PROVIDER=openrouter \
 OPENROUTER_API_KEY=sk-or-v1-... \
-OPENROUTER_MODEL=anthropic/claude-sonnet-4-5 \
+OPENROUTER_MODEL=anthropic/claude-sonnet-4.5 \
   ./target/release/buzz-agent
 
 # Or Databricks model serving via OAuth 2.0 PKCE
@@ -145,7 +145,7 @@ Everything is environment variables. No flags, no config files. (We are a subpro
 | `OPENAI_COMPAT_BASE_URL` | `https://api.openai.com/v1` | Point at vLLM, llama.cpp, Ollama, etc. |
 | `OPENAI_COMPAT_API` | `auto` | `auto` \| `chat` \| `responses`. `auto` picks Responses for `*.openai.com`, Chat Completions everywhere else. |
 | `OPENROUTER_API_KEY` | — | Required when provider=openrouter. |
-| `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4-5`. |
+| `OPENROUTER_MODEL` | — | Required when provider=openrouter. Use OpenRouter's `vendor/model` id, e.g. `anthropic/claude-sonnet-4.5`. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | |
 | `DATABRICKS_HOST` | — | Required when provider=databricks or provider=databricks_v2. |
 | `DATABRICKS_MODEL` | — | Required when provider=databricks or provider=databricks_v2. |
