@@ -1,4 +1,8 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import {
+  activateRateLimit,
+  parseRateLimitHint,
+} from "@/shared/api/relayRateLimitGate";
 import type {
   AddChannelMembersInput,
   AddChannelMembersResult,
@@ -128,6 +132,7 @@ export type RawManagedAgent = {
   system_prompt: string | null;
   avatar_url?: string | null;
   model: string | null;
+  model_source?: ManagedAgent["modelSource"];
   provider: string | null;
   persona_out_of_date: boolean;
   persona_orphaned: boolean;
@@ -180,6 +185,8 @@ export type RawAcpRuntimeCatalogEntry = {
   install_hint: string;
   install_instructions_url: string;
   can_auto_install: boolean;
+  /** Optional only for older E2E fixtures; the Rust catalog always supplies it. */
+  requires_external_cli?: boolean;
   underlying_cli_path: string | null;
   node_required: boolean;
   /** Tagged union with snake_case status values — same shape as `AuthStatus`. */
@@ -280,6 +287,18 @@ function toTauriError(error: unknown): Error {
   }
 }
 
+/**
+ * Inspect a Tauri error message and activate the shared rate-limit gate when
+ * the Rust relay layer emitted an HTTP 429 response (`relay rate-limited:` prefix).
+ *
+ * Extracted so it can be unit-tested without mocking the Tauri invoke bridge.
+ */
+export function applyTauriRateLimitIfNeeded(message: string): void {
+  if (message.startsWith("relay rate-limited:")) {
+    activateRateLimit(parseRateLimitHint(message));
+  }
+}
+
 export async function invokeTauri<T>(
   command: string,
   args?: Record<string, unknown>,
@@ -287,7 +306,11 @@ export async function invokeTauri<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    throw toTauriError(error);
+    const err = toTauriError(error);
+    // Rust emits `relay rate-limited:` for HTTP 429 responses. Activate the
+    // shared gate so the TS relay client backs off for the same window.
+    applyTauriRateLimitIfNeeded(err.message);
+    throw err;
   }
 }
 
@@ -337,6 +360,10 @@ export async function getPresence(pubkeys: string[]): Promise<PresenceLookup> {
 
 export function getDefaultRelayUrl(): Promise<string> {
   return invokeTauri<string>("get_default_relay_url");
+}
+
+export function autoConnectDefaultRelayEnabled(): Promise<boolean> {
+  return invokeTauri<boolean>("auto_connect_default_relay_enabled");
 }
 
 export function isSharedIdentity(): Promise<boolean> {
@@ -675,6 +702,8 @@ export function fromRawManagedAgent(agent: RawManagedAgent): ManagedAgent {
     systemPrompt: agent.system_prompt,
     avatarUrl: agent.avatar_url ?? null,
     model: agent.model,
+    modelSource: agent.model_source ?? null,
+    // Fallbacks for pre-feature mocks/fixtures. Real records always carry them.
     provider: agent.provider ?? null,
     personaOutOfDate: agent.persona_out_of_date ?? false,
     personaOrphaned: agent.persona_orphaned ?? false,
@@ -719,6 +748,7 @@ function fromRawAcpRuntimeCatalogEntry(
     installHint: entry.install_hint,
     installInstructionsUrl: entry.install_instructions_url,
     canAutoInstall: entry.can_auto_install,
+    requiresExternalCli: entry.requires_external_cli ?? false,
     underlyingCliPath: entry.underlying_cli_path,
     nodeRequired: entry.node_required,
     authStatus: entry.auth_status,

@@ -1,5 +1,12 @@
 use crate::managed_agents::known_acp_runtime;
 
+// ── desktop binary name tests ───────────────────────────────────────────
+
+#[test]
+fn appimage_binary_matches_truncated_linux_comm_name() {
+    assert!(super::is_desktop_binary("buzz-desktop.bi"));
+}
+
 // ── buffer_contains_identifier tests ────────────────────────────────────
 
 #[test]
@@ -308,20 +315,16 @@ fn persona_with_provider(
 // that the old create-time env baking silently blocked.
 
 use crate::managed_agents::env_vars::{live_persona_env, merged_user_env};
-use crate::managed_agents::persona_events::persona_snapshot;
 use std::collections::BTreeMap;
 
 /// Apply a persona snapshot onto a record, mirroring `create_managed_agent`:
-/// snapshotted prompt/model/provider/source_version are pinned, with the
-/// system_prompt unwrapped (the persona always carries one). `env_vars` is
-/// deliberately NOT touched — it stays agent overrides only.
+/// links the record to `persona.id`, then delegates the actual snapshot
+/// (prompt/model/provider/runtime/source_version) to the real production
+/// `apply_persona_snapshot` — so a change to that function's behavior is
+/// exercised by these tests instead of silently diverging from it.
 fn pin_persona(record: &mut ManagedAgentRecord, persona: &crate::managed_agents::AgentDefinition) {
-    let snapshot = persona_snapshot(persona);
     record.persona_id = Some(persona.id.clone());
-    record.system_prompt = snapshot.system_prompt;
-    record.model = snapshot.model;
-    record.provider = snapshot.provider;
-    record.persona_source_version = Some(snapshot.source_version);
+    crate::managed_agents::persona_events::apply_persona_snapshot(record, persona);
 }
 
 fn persona_v(
@@ -421,19 +424,31 @@ fn agent_env_overrides_win_over_persona_env_at_spawn() {
 }
 
 #[test]
-fn orphaned_agent_spawns_from_its_own_overrides() {
-    // Persona deleted: the live merge degrades to the record's own overrides.
+fn orphaned_agent_refused_at_spawn_boundary() {
+    // Persona deleted: `spawn_agent_child` must refuse before any process
+    // side effect, not silently degrade to the record's stale overrides.
+    // `require_resolved` on the shared resolver is the pure predicate
+    // `spawn_agent_child` checks first — this pins the contract without
+    // needing a real `AppHandle`.
     let persona = persona_v("p", "prompt", &[("ANTHROPIC_API_KEY", "persona-key")]);
     let mut record = fixture(RespondTo::Anyone, vec![], Some("tag".into()));
     record.env_vars = BTreeMap::from([("EXTRA".to_string(), "agent-value".to_string())]);
     pin_persona(&mut record, &persona);
 
-    let env = spawn_user_env(&record, &[]);
-    assert_eq!(env.get("EXTRA").map(String::as_str), Some("agent-value"));
+    // The persona is absent from the live catalog — same shape restore/start
+    // see when a persona was deleted on another device.
+    let no_personas: &[crate::managed_agents::AgentDefinition] = &[];
+    let error = crate::managed_agents::effective_config::resolve_effective_config(
+        &record,
+        no_personas,
+        &Default::default(),
+    )
+    .require_resolved()
+    .unwrap_err();
     assert_eq!(
-        env.get("ANTHROPIC_API_KEY"),
-        None,
-        "a deleted persona's env must not linger"
+        error,
+        crate::managed_agents::effective_config::ORPHANED_INSTANCE_ERROR.to_string(),
+        "an orphaned linked instance must be refused, not spawned from its own overrides"
     );
 }
 
@@ -577,6 +592,102 @@ fn name_matches_interpreter_rejects_node_prefix() {
     assert!(!super::name_matches_interpreter("node_modules"));
     assert!(!super::name_matches_interpreter("nodejs"));
     assert!(!super::name_matches_interpreter("node-gyp"));
+}
+
+#[test]
+fn claude_spawn_uses_the_probed_cli_executable() {
+    let _guard = crate::managed_agents::lock_path_mutex();
+    let temp = tempfile::tempdir().expect("temp dir");
+    let cli = temp
+        .path()
+        .join(format!("claude{}", std::env::consts::EXE_SUFFIX));
+    std::fs::write(&cli, "").expect("write fake cli");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755))
+            .expect("make fake cli executable");
+    }
+    let original_path = std::env::var_os("PATH");
+    std::env::set_var("PATH", temp.path());
+
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("claude-agent-acp"));
+
+    if let Some(path) = original_path {
+        std::env::set_var("PATH", path);
+    } else {
+        std::env::remove_var("PATH");
+    }
+    assert!(command
+        .get_envs()
+        .any(|(key, value)| { key == "CLAUDE_CODE_EXECUTABLE" && value == Some(cli.as_os_str()) }));
+}
+
+#[test]
+fn codex_spawn_does_not_set_a_claude_executable() {
+    let mut command = std::process::Command::new("buzz-acp");
+    super::configure_runtime_cli(&mut command, super::known_acp_runtime("codex-acp"));
+    assert!(!command
+        .get_envs()
+        .any(|(key, _)| key == "CLAUDE_CODE_EXECUTABLE"));
+}
+
+/// On Windows, `.cmd` and `.bat` batch shims must NOT be assigned to
+/// `CLAUDE_CODE_EXECUTABLE` — `CreateProcess` cannot exec them directly and
+/// returns EINVAL (issue #2397). The adapter must fall back to its own PATH
+/// lookup instead.
+///
+/// These tests exercise `is_batch_shim` directly — a pure path predicate with
+/// no global PATH or resolve_command cache involvement — so they run on every
+/// host and cannot be poisoned by the `claude_spawn_uses_the_probed_cli_executable`
+/// test that runs before them.
+#[test]
+fn batch_shim_cmd_extension_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.cmd")),
+        "claude.cmd must be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_cmd_extension_uppercase_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.CMD")),
+        "claude.CMD must be identified as a batch shim (case-insensitive)"
+    );
+}
+
+#[test]
+fn batch_shim_bat_extension_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.bat")),
+        "claude.bat must be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_bat_extension_uppercase_is_rejected() {
+    assert!(
+        super::path::is_batch_shim(std::path::Path::new("claude.BAT")),
+        "claude.BAT must be identified as a batch shim (case-insensitive)"
+    );
+}
+
+#[test]
+fn batch_shim_exe_extension_is_not_rejected() {
+    assert!(
+        !super::path::is_batch_shim(std::path::Path::new("claude.exe")),
+        "claude.exe must not be identified as a batch shim"
+    );
+}
+
+#[test]
+fn batch_shim_no_extension_is_not_rejected() {
+    assert!(
+        !super::path::is_batch_shim(std::path::Path::new("claude")),
+        "claude (no extension) must not be identified as a batch shim"
+    );
 }
 
 // ── PGID-based orphan sweep tests ───────────────────────────────────────
@@ -759,4 +870,185 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     // Cleanup: SIGKILL the intermediate's process group (takes sleep 30 with it).
     unsafe { libc::kill(-(intermediate_pid as i32), libc::SIGKILL) };
     let _ = intermediate.wait();
+}
+
+// ── pair receipt validation tests ───────────────────────────────────────
+
+fn receipt_fixture(
+    key: crate::managed_agents::ManagedAgentRuntimeKey,
+) -> crate::managed_agents::ManagedAgentRuntimeReceipt {
+    crate::managed_agents::ManagedAgentRuntimeReceipt {
+        key,
+        pid: std::process::id(),
+        desktop_instance_id: "test-instance".into(),
+        started_at: "now".into(),
+    }
+}
+
+#[test]
+fn receipt_validation_rejects_noncanonical_identity() {
+    let mut receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    receipt.key.relay_url = "WSS://RELAY.EXAMPLE/".into();
+    let path = std::path::PathBuf::from(format!("{}.json", receipt.key.runtime_id()));
+    assert!(!super::valid_agent_runtime_receipt(
+        &path,
+        &receipt,
+        "test-instance"
+    ));
+}
+
+#[test]
+fn receipt_validation_rejects_wrong_pair_filename() {
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    assert!(!super::valid_agent_runtime_receipt(
+        std::path::Path::new("corrupted.json"),
+        &receipt,
+        "test-instance"
+    ));
+}
+
+#[test]
+fn replacement_removes_receipt_only_after_confirmed_exit() {
+    use std::cell::{Cell, RefCell};
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let path = std::path::Path::new("pair.json");
+    let terminated = Cell::new(None);
+    let polls = Cell::new(0);
+    let removed = RefCell::new(None);
+
+    super::terminate_runtime_receipt_with(
+        path,
+        &receipt,
+        |pid| {
+            terminated.set(Some(pid));
+            Ok(())
+        },
+        |_| {
+            let poll = polls.get() + 1;
+            polls.set(poll);
+            poll < 2
+        },
+        |path| *removed.borrow_mut() = Some(path.to_path_buf()),
+    )
+    .unwrap();
+
+    assert_eq!(terminated.get(), Some(receipt.pid));
+    assert_eq!(polls.get(), 2);
+    assert_eq!(removed.into_inner().as_deref(), Some(path));
+}
+
+#[test]
+fn replacement_failure_keeps_receipt() {
+    use std::cell::Cell;
+
+    let receipt = receipt_fixture(
+        crate::managed_agents::ManagedAgentRuntimeKey::new("aa".repeat(32), "wss://relay.example")
+            .unwrap(),
+    );
+    let removed = Cell::new(false);
+    let error = super::terminate_runtime_receipt_with(
+        std::path::Path::new("pair.json"),
+        &receipt,
+        |_| Err("signal failed".into()),
+        |_| false,
+        |_| removed.set(true),
+    )
+    .unwrap_err();
+
+    assert_eq!(error, "signal failed");
+    assert!(!removed.get());
+}
+
+// ── workspace pair-key resolution (summary/stop scoping) ────────────────
+
+#[test]
+fn unpinned_record_resolves_pair_key_per_workspace() {
+    // Community-scoped truth: an unpinned agent running only on relay A must
+    // read as running in workspace A and stopped in workspace B — the pair
+    // key the summary looks up differs per workspace.
+    let pubkey = "aa".repeat(32);
+    let key_a = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
+    let key_b = super::resolve_workspace_pair_key(&pubkey, "", "wss://two.example").unwrap();
+
+    let runtimes = std::collections::HashMap::from([(key_a.clone(), ())]);
+    assert!(runtimes.contains_key(&key_a));
+    assert!(!runtimes.contains_key(&key_b));
+}
+
+#[test]
+fn stored_relay_pin_is_ignored_in_pair_key_resolution() {
+    // Legacy pins are ignored (#2122): a record carrying a creation-era
+    // `relay_url` resolves the same per-workspace pair key an unpinned record
+    // does, so summaries/stop act on the community being viewed.
+    let pubkey = "aa".repeat(32);
+    let from_a =
+        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://one.example")
+            .unwrap();
+    let from_b =
+        super::resolve_workspace_pair_key(&pubkey, "wss://pinned.example", "wss://two.example")
+            .unwrap();
+    assert_ne!(from_a, from_b);
+    assert_eq!(from_a.relay_url, "wss://one.example");
+    assert_eq!(from_b.relay_url, "wss://two.example");
+}
+
+#[test]
+fn workspace_pair_key_is_canonical() {
+    // Spawn stamps the canonical key; lookup must hit the same entry even
+    // when the workspace relay is written in a non-canonical form.
+    let pubkey = "aa".repeat(32);
+    let stamped = super::resolve_workspace_pair_key(&pubkey, "", "wss://one.example").unwrap();
+    let viewed = super::resolve_workspace_pair_key(&pubkey, "", "WSS://One.Example:443/").unwrap();
+    assert_eq!(stamped, viewed);
+}
+
+#[test]
+fn invalid_pubkey_resolves_no_pair_key() {
+    // Key-less records (keys minted on first start) cannot form a pair key;
+    // the summary must fall back to the stopped/legacy-pid path, not panic.
+    assert!(super::resolve_workspace_pair_key("not-a-key", "", "wss://one.example").is_none());
+}
+
+// ── restart_eligible tests ──────────────────────────────────────────────
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_hash_drift() {
+    assert!(super::restart_eligible(false, true, false));
+}
+
+#[test]
+fn restart_eligible_true_when_non_orphan_has_availability_drift() {
+    assert!(super::restart_eligible(false, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_hash_drift() {
+    // An orphan can never be restarted successfully — spawn refuses it —
+    // so hash drift alone must not surface "Restart required".
+    assert!(!super::restart_eligible(true, true, false));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_availability_drift() {
+    assert!(!super::restart_eligible(true, false, true));
+}
+
+#[test]
+fn restart_eligible_false_when_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(true, false, false));
+}
+
+#[test]
+fn restart_eligible_false_when_non_orphan_has_no_drift() {
+    assert!(!super::restart_eligible(false, false, false));
 }

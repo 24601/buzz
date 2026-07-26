@@ -8,6 +8,7 @@ pub(crate) use agent_env::{
 mod backend;
 pub(crate) mod config_bridge;
 mod discovery;
+pub(crate) mod effective_config;
 mod env_vars;
 pub(crate) mod git_bash;
 pub(crate) mod global_config;
@@ -25,6 +26,8 @@ mod repos;
 mod restore;
 pub mod retention;
 mod runtime;
+mod runtime_commands;
+mod runtime_types;
 pub(crate) mod spawn_hash;
 pub(crate) mod storage;
 pub(crate) mod team_events;
@@ -66,6 +69,8 @@ pub use repos::{
 };
 pub use restore::*;
 pub use runtime::*;
+pub use runtime_commands::*;
+pub use runtime_types::*;
 pub use storage::*;
 pub use teams::*;
 pub use types::*;

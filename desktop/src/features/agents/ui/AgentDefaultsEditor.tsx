@@ -8,6 +8,7 @@
  * Precedence: baked floor < GLOBAL (this card) < persona < per-agent.
  */
 import { AlertCircle, Check, Loader } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import * as React from "react";
 
 import { useQueryClient } from "@tanstack/react-query";
@@ -19,20 +20,45 @@ import {
 import type { GlobalAgentConfig } from "@/shared/api/types";
 import { getBakedBuildEnv, type BakedEnvEntry } from "@/shared/api/tauri";
 import { globalAgentConfigQueryKey } from "@/features/agents/useGlobalAgentConfig";
-import { useAcpRuntimesQuery } from "@/features/agents/hooks";
+import {
+  useAcpRuntimesQuery,
+  useRuntimeFileConfigQuery,
+} from "@/features/agents/hooks";
+import {
+  formatRuntimeOptionLabel,
+  getDefaultPersonaRuntime,
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  resetConfigForHarnessChange,
+  sortPersonaRuntimes,
+} from "@/features/agents/ui/agentConfigOptions";
+import { AgentDropdownSelect } from "@/features/agents/ui/agentConfigControls";
 import {
   AgentConfigFields,
   EMPTY_GLOBAL_CONFIG,
 } from "@/features/agents/ui/AgentConfigFields";
+import { cn } from "@/shared/lib/cn";
 import { Button } from "@/shared/ui/button";
 
 type SaveState = "idle" | "saving" | "saved" | "error";
+
+const PROGRESSIVE_FIELDS_TRANSITION = {
+  duration: 0.22,
+  ease: [0.23, 1, 0.32, 1],
+} as const;
+
+const PERSONA_SELECT_TRIGGER_CLASS = cn(
+  PERSONA_FIELD_CONTROL_CLASS,
+  PERSONA_FIELD_SHELL_CLASS,
+  "h-11 px-3 py-2 leading-6 hover:bg-muted/40 focus:bg-muted/40 [&>svg]:text-muted-foreground/60",
+);
 
 export type GlobalAgentConfigSaveResult = Awaited<
   ReturnType<typeof setGlobalAgentConfig>
 >;
 
 type AgentDefaultsEditorProps = {
+  layout?: "flat" | "grouped";
   onDirtyChange?: (dirty: boolean) => void;
   onSaveSuccess?: (result: GlobalAgentConfigSaveResult) => void;
   onSavingChange?: (saving: boolean) => void;
@@ -40,11 +66,14 @@ type AgentDefaultsEditorProps = {
 };
 
 export function AgentDefaultsEditor({
+  layout = "grouped",
   onDirtyChange,
   onSaveSuccess,
   onSavingChange,
   secondaryAction,
 }: AgentDefaultsEditorProps) {
+  const flatLayout = layout === "flat";
+  const shouldReduceMotion = useReducedMotion();
   const [config, setConfig] =
     React.useState<GlobalAgentConfig>(EMPTY_GLOBAL_CONFIG);
   const configRef = React.useRef(config);
@@ -105,17 +134,47 @@ export function AgentDefaultsEditor({
       });
   }, []);
 
-  // Resolve the buzz-agent runtime catalog entry for model discovery.
   const runtimesQuery = useAcpRuntimesQuery();
-  const buzzAgentRuntime = React.useMemo(
-    () => (runtimesQuery.data ?? []).find((r) => r.id === "buzz-agent"),
+  const sortedRuntimes = React.useMemo(
+    () => sortPersonaRuntimes(runtimesQuery.data ?? []),
     [runtimesQuery.data],
+  );
+  // An unset preferred runtime uses the same Buzz Agent-first fallback as
+  // deployment. The rendered draft below carries that fallback forward so the
+  // next user edit persists the visible harness instead of saving null.
+  const selectedRuntime = React.useMemo(() => {
+    const configuredRuntime = sortedRuntimes.find(
+      (runtime) => runtime.id === config.preferred_runtime,
+    );
+    return (
+      configuredRuntime ??
+      getDefaultPersonaRuntime(sortedRuntimes) ??
+      sortedRuntimes[0]
+    );
+  }, [config.preferred_runtime, sortedRuntimes]);
+  const renderedConfig = React.useMemo(
+    () =>
+      config.preferred_runtime || !selectedRuntime
+        ? config
+        : { ...config, preferred_runtime: selectedRuntime.id },
+    [config, selectedRuntime],
+  );
+  const { data: runtimeFileConfig } = useRuntimeFileConfigQuery(
+    selectedRuntime?.id ?? "",
+  );
+  const harnessOptions = React.useMemo(
+    () =>
+      sortedRuntimes.map((runtime) => ({
+        label: formatRuntimeOptionLabel(runtime),
+        value: runtime.id,
+      })),
+    [sortedRuntimes],
   );
   const configSurfaceLoading = isLoading || runtimesQuery.isLoading;
   const configSurfaceError =
     loadError ||
     runtimesQuery.isError ||
-    (!configSurfaceLoading && buzzAgentRuntime === undefined);
+    (!configSurfaceLoading && sortedRuntimes.length === 0);
 
   function handleConfigChange(next: GlobalAgentConfig) {
     configRef.current = next;
@@ -123,6 +182,13 @@ export function AgentDefaultsEditor({
     setDirty(true);
     setSaveState("idle");
     setSaveError(null);
+  }
+
+  function handleHarnessChange(runtimeId: string) {
+    handleConfigChange(resetConfigForHarnessChange(config, runtimeId));
+    setConfigIsValid(false);
+    setIsCustomModelEditing(false);
+    setIsCustomProvider(false);
   }
 
   async function handleSave() {
@@ -170,8 +236,32 @@ export function AgentDefaultsEditor({
     }
   }
 
+  const configFields = selectedRuntime ? (
+    <AgentConfigFields
+      bakedEnv={bakedEnv}
+      selectedRuntime={selectedRuntime}
+      config={renderedConfig}
+      disclosure={flatLayout ? "progressive-defaults" : "full"}
+      isCustomModelEditing={isCustomModelEditing}
+      isCustomProvider={isCustomProvider}
+      onConfigChange={handleConfigChange}
+      onCustomModelEditingChange={setIsCustomModelEditing}
+      onIsCustomProviderChange={setIsCustomProvider}
+      onValidityChange={setConfigIsValid}
+      placeholderClassName={flatLayout ? "text-muted-foreground/55" : undefined}
+      runtimeFileConfig={runtimeFileConfig}
+      key={selectedRuntime.id}
+      selectClassName={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
+      unstyled={flatLayout}
+      useCustomSelect
+    />
+  ) : null;
+  const progressiveFieldsTransition = shouldReduceMotion
+    ? { duration: 0 }
+    : PROGRESSIVE_FIELDS_TRANSITION;
+
   return (
-    <div className="min-w-0 space-y-4">
+    <div className={cn("min-w-0", flatLayout ? "space-y-7" : "space-y-4")}>
       {configSurfaceLoading ? (
         <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">
           <Loader className="size-4 animate-spin" />
@@ -183,17 +273,47 @@ export function AgentDefaultsEditor({
           Couldn't load agent defaults. Restart the app to try again.
         </div>
       ) : (
-        <AgentConfigFields
-          bakedEnv={bakedEnv}
-          selectedRuntime={buzzAgentRuntime}
-          config={config}
-          isCustomModelEditing={isCustomModelEditing}
-          isCustomProvider={isCustomProvider}
-          onConfigChange={handleConfigChange}
-          onCustomModelEditingChange={setIsCustomModelEditing}
-          onIsCustomProviderChange={setIsCustomProvider}
-          onValidityChange={setConfigIsValid}
-        />
+        <>
+          <div className="space-y-1.5">
+            <label
+              className="text-sm font-medium text-foreground"
+              htmlFor="global-agent-default-harness"
+            >
+              Default harness
+            </label>
+            <AgentDropdownSelect
+              className={flatLayout ? PERSONA_SELECT_TRIGGER_CLASS : undefined}
+              id="global-agent-default-harness"
+              onValueChange={handleHarnessChange}
+              options={harnessOptions}
+              placeholder="Select a harness"
+              placeholderClassName={
+                flatLayout ? "text-muted-foreground/55" : undefined
+              }
+              testId="global-agent-default-harness"
+              value={selectedRuntime?.id ?? ""}
+            />
+          </div>
+          {flatLayout ? (
+            <AnimatePresence initial={false}>
+              {configFields ? (
+                <motion.div
+                  animate={{ height: "auto", opacity: 1 }}
+                  className="overflow-hidden"
+                  data-testid="global-agent-runtime-fields-motion"
+                  exit={{ height: 0, opacity: 0 }}
+                  initial={{ height: 0, opacity: 0 }}
+                  key={selectedRuntime?.id}
+                  transition={progressiveFieldsTransition}
+                >
+                  {configFields}
+                </motion.div>
+              ) : null}
+            </AnimatePresence>
+          ) : (
+            configFields
+          )}
+        </>
       )}
 
       {/* Save bar */}
@@ -218,7 +338,12 @@ export function AgentDefaultsEditor({
           <div className="ml-auto flex items-center gap-3">
             {secondaryAction}
             <Button
-              disabled={!dirty || !configIsValid || saveState === "saving"}
+              disabled={
+                !dirty ||
+                !configIsValid ||
+                selectedRuntime === undefined ||
+                saveState === "saving"
+              }
               onClick={() => void handleSave()}
               size="sm"
             >

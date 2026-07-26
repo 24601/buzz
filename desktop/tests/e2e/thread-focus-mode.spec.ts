@@ -143,7 +143,16 @@ test("focus and split preserve reading context and interaction ownership", async
   await page.addInitScript(() => {
     localStorage.setItem("buzz.channels.threadViewMode", "focus");
   });
-  await installMockBridge(page);
+  await installMockBridge(page, {
+    managedAgents: [
+      {
+        pubkey:
+          "953d3363262e86b770419834c53d2446409db6d918a57f8f339d495d54ab001f",
+        name: "alice",
+        status: "stopped",
+      },
+    ],
+  });
   await page.goto("/");
   const rootId = await seedLongThread(page);
 
@@ -178,13 +187,20 @@ test("focus and split preserve reading context and interaction ownership", async
   });
   const anchorId = await topVisibleMessageId(body);
 
-  await page
-    .getByRole("button", { name: "Show thread beside channel" })
-    .click();
+  const focusModeToggle = page.getByRole("button", {
+    name: "Show thread beside channel",
+  });
+  await focusModeToggle.hover();
+  await expect(
+    page.getByRole("tooltip", { name: "Show thread beside channel" }),
+  ).toBeVisible();
+  await focusModeToggle.click();
   await expect(drawer).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");
   await expectChannelHeaderUnobscured(page);
-  await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await expect(page.getByTestId("message-thread-body")).toBeFocused();
+  await expect(summary).not.toBeFocused();
   await expect(
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
@@ -192,7 +208,15 @@ test("focus and split preserve reading context and interaction ownership", async
     body.locator(`[data-message-id="${anchorId}"]`),
   ).not.toHaveAttribute("data-highlighted", "true");
 
-  await page.getByRole("button", { name: "Expand thread" }).click();
+  // Sidebar background dismissal belongs to the overlay presentation only.
+  await page
+    .getByTestId("app-sidebar-scroll-anchor")
+    .evaluate((element) => (element as HTMLElement).click());
+  await expect(page.getByTestId("message-thread-panel")).toBeVisible();
+
+  const splitModeToggle = page.getByRole("button", { name: "Expand thread" });
+  await splitModeToggle.focus();
+  await splitModeToggle.press("Enter");
   await expect(drawer).toBeVisible();
   await expect(channel).toHaveAttribute("inert", "");
   await expect(page.getByTestId("thread-view-mode-toggle")).toBeFocused();
@@ -200,32 +224,34 @@ test("focus and split preserve reading context and interaction ownership", async
     body.locator(`[data-message-id="${anchorId}"]`),
   ).toBeInViewport();
 
-  // Escape layering: a nested control inside the drawer claims Escape first.
-  // With mention autocomplete open, Escape closes only the autocomplete — the
-  // drawer must stay.
+  // Focus mode owns Escape even while the rich-text composer and one of its
+  // nested controls has focus: one press exits the focused thread.
   const threadInput = page
     .getByTestId("message-thread-panel")
     .getByTestId("message-input");
   await threadInput.click();
   await threadInput.pressSequentially("@al");
-  const mentionDropdown = page
-    .getByTestId("message-thread-panel")
-    .getByTestId("mention-autocomplete");
-  await expect(mentionDropdown).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(mentionDropdown).toHaveCount(0);
-  await expect(drawer).toBeVisible();
-
-  // Known gap (pre-existing, tracked as a follow-up): while the composer's
-  // rich-text editor holds focus it claims Escape internally even with no
-  // autocomplete open, so Escape-from-composer never reaches the drawer's
-  // close listener. Move focus to the drawer itself before asserting
-  // Escape-to-close. When the editor is taught to release an idle Escape,
-  // this focus hop can be removed.
-  await drawer.focus();
+  await expect(
+    page
+      .getByTestId("message-thread-panel")
+      .getByTestId("mention-autocomplete"),
+  ).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
   await expect(channel).not.toHaveAttribute("inert", "");
+
+  await summary.click();
+  await expect(drawer).toBeVisible();
+  const profileCard = page.getByTestId("sidebar-profile-card");
+  await profileCard.click({ position: { x: 8, y: 8 } });
+  await expect(page.getByTestId("profile-popover")).toBeVisible();
+  await expect(drawer).toBeVisible();
+  await profileCard.click({ position: { x: 8, y: 8 } });
+  await expect(page.getByTestId("profile-popover")).toHaveCount(0);
+  await page
+    .getByTestId("app-sidebar-scroll-anchor")
+    .evaluate((element) => (element as HTMLElement).click());
+  await expect(page.getByTestId("focus-thread-drawer-overlay")).toHaveCount(0);
 
   await summary.click();
   await expect(drawer).toBeVisible();

@@ -178,11 +178,15 @@ fn persona_prompt_edit_changes_hash() {
 }
 
 #[test]
-fn workspace_relay_change_trips_hash_for_blank_record_relay() {
-    // A blank record relay spawns against the active workspace relay, so a
-    // workspace relay change means a restart would change what runs.
-    let mut rec = record();
-    rec.relay_url = String::new();
+fn workspace_relay_change_trips_hash_even_for_stored_record_relay() {
+    // The legacy per-record relay pin is ignored (#2122): every record spawns
+    // against the active workspace relay, so a workspace relay change means a
+    // restart would change what runs — pinned records included.
+    let rec = record();
+    assert!(
+        !rec.relay_url.is_empty(),
+        "fixture should carry a legacy pin"
+    );
     assert_ne!(
         spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
         spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
@@ -190,13 +194,16 @@ fn workspace_relay_change_trips_hash_for_blank_record_relay() {
 }
 
 #[test]
-fn workspace_relay_change_ignored_for_pinned_record_relay() {
-    // An explicit per-agent relay pins the agent regardless of workspace, so
-    // a workspace relay change must NOT badge a pinned agent.
-    let rec = record();
+fn stored_record_relay_does_not_affect_hash() {
+    // Editing the (ignored) stored pin must not badge a restart: what a
+    // restart would run is identical either way.
+    let mut a = record();
+    let mut b = record();
+    a.relay_url = String::new();
+    b.relay_url = "wss://legacy-pin.example".into();
     assert_eq!(
-        spawn_config_hash(&rec, &[], &[], "wss://relay-a.example", &Default::default()),
-        spawn_config_hash(&rec, &[], &[], "wss://relay-b.example", &Default::default())
+        spawn_config_hash(&a, &[], &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&b, &[], &[], "wss://ws.example", &Default::default())
     );
 }
 
@@ -257,14 +264,11 @@ fn allowlist_content_edit_still_changes_hash() {
 }
 
 #[test]
-fn explicit_default_max_turn_duration_does_not_change_hash() {
-    // Spawn writes BUZZ_ACP_MAX_TURN_DURATION with the default filled in, so
-    // None → Some(default) is the same spawned value and must not badge.
+fn explicit_max_turn_duration_changes_hash_from_none() {
     let rec = record();
     let mut edited = record();
-    edited.max_turn_duration_seconds =
-        Some(crate::managed_agents::types::DEFAULT_AGENT_MAX_TURN_DURATION_SECONDS);
-    assert_eq!(
+    edited.max_turn_duration_seconds = Some(7200);
+    assert_ne!(
         spawn_config_hash(&rec, &[], &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&edited, &[], &[], "wss://ws.example", &Default::default())
     );
@@ -369,21 +373,39 @@ fn definition_runtime_edit_changes_hash_for_materialized_record() {
     );
 }
 
-/// (c) An explicit agent_command_override (ladder step 1) must beat a
-/// changed definition runtime — the badge must NOT fire for a pinned instance.
+/// (c) A pin naming a KNOWN runtime no longer beats a changed definition
+/// runtime — apply_persona_snapshot clears the stale pin, so the badge fires.
 #[test]
-fn agent_command_override_beats_definition_runtime_change() {
+fn known_runtime_pin_yields_to_definition_runtime_change() {
     let mut rec = record();
     rec.persona_id = Some("pers".into());
     rec.runtime = Some("goose".into()); // materialized runtime
-    rec.agent_command_override = Some("goose".into()); // explicit per-instance pin
+    rec.agent_command_override = Some("goose".into()); // create-time pin
+
+    let before = [persona("pers", Some("goose"), "prompt")];
+    let after = [persona("pers", Some("claude"), "prompt")];
+    assert_ne!(
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        "stale known-runtime pin must not shadow a definition runtime edit"
+    );
+}
+
+/// (c2) A custom-command override (no matching known runtime) still beats a
+/// changed definition runtime — the badge must NOT fire for such a pin.
+#[test]
+fn custom_command_override_beats_definition_runtime_change() {
+    let mut rec = record();
+    rec.persona_id = Some("pers".into());
+    rec.runtime = Some("goose".into()); // materialized runtime
+    rec.agent_command_override = Some("/opt/custom/my-agent".into());
 
     let before = [persona("pers", Some("goose"), "prompt")];
     let after = [persona("pers", Some("claude"), "prompt")];
     assert_eq!(
         spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
         spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
-        "explicit override must win regardless of definition runtime change"
+        "custom command override must win regardless of definition runtime change"
     );
 }
 
@@ -419,18 +441,123 @@ fn missing_definition_leaves_materialized_runtime_in_hash() {
     );
 }
 
+// ── Global default trips hash for linked inherited agents ─────────────────
+
 #[test]
-fn effective_spawn_prompt_matches_hash_semantics() {
-    // The env write and the hash share effective_spawn_prompt — this row
-    // pins the helper's own semantics so a refactor of either caller cannot
-    // silently diverge from the contract.
-    let mut r = record();
-    r.system_prompt = Some(String::new());
-    assert_eq!(
-        effective_spawn_prompt(&r),
-        None,
-        "empty collapses to absent"
+fn global_model_change_trips_hash_for_linked_inherited_agent() {
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.model = Some("stale-record-model".into());
+
+    let personas = vec![persona("p1", Some("goose"), "prompt")];
+
+    let global_a = GlobalAgentConfig {
+        model: Some("model-a".to_string()),
+        provider: Some("prov-a".to_string()),
+        ..Default::default()
+    };
+    let global_b = GlobalAgentConfig {
+        model: Some("model-b".to_string()),
+        provider: Some("prov-b".to_string()),
+        ..Default::default()
+    };
+
+    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+
+    assert_ne!(
+        hash_a, hash_b,
+        "changing the global default must trip the hash for a linked inherited agent"
     );
-    r.system_prompt = Some("real".into());
-    assert_eq!(effective_spawn_prompt(&r).as_deref(), Some("real"));
+}
+
+#[test]
+fn global_model_change_trips_hash_without_model_env_var() {
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.agent_command = "some-harness-without-model-env".into();
+
+    let personas = vec![{
+        let mut p = persona("p1", None, "prompt");
+        p.model = None;
+        p.provider = None;
+        p
+    }];
+
+    let global_a = GlobalAgentConfig {
+        model: Some("model-a".to_string()),
+        ..Default::default()
+    };
+    let global_b = GlobalAgentConfig {
+        model: Some("model-b".to_string()),
+        ..Default::default()
+    };
+
+    let hash_a = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_a);
+    let hash_b = spawn_config_hash(&rec, &personas, &[], "wss://ws.example", &global_b);
+
+    assert_ne!(
+        hash_a, hash_b,
+        "global model change must trip hash even without a model_env_var runtime"
+    );
+}
+
+#[test]
+fn linked_instance_stale_prompt_bytes_are_inert_at_hash_time() {
+    // Regression for the split-resolve defect: prompt used to be read from
+    // the record's own (possibly Phase-A-snapshot-stale) bytes while
+    // model/provider were resolved live from the definition. A definition
+    // edit landing between a caller's snapshot apply and spawn could hand a
+    // fresh model/provider to a stale prompt, and the hash (which already
+    // resolved model/provider live) would silently agree with a spawn that
+    // wrote the stale prompt. Now both come from one `resolve_effective_config`
+    // call, so a record whose own `system_prompt` bytes disagree with the
+    // live definition must hash exactly as if the record carried the
+    // definition's prompt verbatim — the record's prompt bytes are inert for
+    // a linked instance.
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.system_prompt = Some("stale prompt on record".into());
+
+    let mut matching_bytes = rec.clone();
+    matching_bytes.system_prompt = Some("live prompt".into());
+
+    let personas = [persona("p1", Some("goose"), "live prompt")];
+
+    assert_eq!(
+        spawn_config_hash(
+            &rec,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
+        spawn_config_hash(
+            &matching_bytes,
+            &personas,
+            &[],
+            "wss://ws.example",
+            &Default::default()
+        ),
+        "record's own system_prompt bytes must not affect the hash of a linked instance"
+    );
+}
+
+#[test]
+fn linked_instance_prompt_model_provider_resolve_from_one_call() {
+    // The prompt for a linked instance must track the definition, exactly
+    // like model/provider — a definition prompt edit trips the hash even
+    // though the record's own (stale) system_prompt bytes are unchanged.
+    let mut rec = record();
+    rec.persona_id = Some("p1".into());
+    rec.system_prompt = Some("stale".into());
+
+    let before = [persona("p1", Some("goose"), "old definition prompt")];
+    let after = [persona("p1", Some("goose"), "new definition prompt")];
+
+    assert_ne!(
+        spawn_config_hash(&rec, &before, &[], "wss://ws.example", &Default::default()),
+        spawn_config_hash(&rec, &after, &[], "wss://ws.example", &Default::default()),
+        "linked instance prompt must resolve from the live definition, not stale record bytes"
+    );
 }

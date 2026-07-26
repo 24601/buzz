@@ -6,7 +6,7 @@ use crate::managed_agents::{AgentModelInfo, AgentModelsResponse};
 
 #[cfg(test)]
 use super::env_value;
-use super::{env_or_process_value, redaction_env_with_value};
+use super::{env_or_process_value, redaction_env_with_value, DiscoveryProvider};
 
 #[derive(Debug, Deserialize)]
 #[cfg_attr(test, derive(Clone))]
@@ -47,16 +47,18 @@ fn openrouter_models_url_for_discovery(env: &BTreeMap<String, String>) -> String
 
 pub(super) async fn discover_openrouter_models(
     client: &reqwest::Client,
-    provider: Option<&str>,
+    provider: &DiscoveryProvider,
     env: &BTreeMap<String, String>,
     selected_model: Option<String>,
 ) -> Result<Option<AgentModelsResponse>, String> {
-    if !is_openrouter_provider(provider) {
+    if !is_openrouter_provider(provider.as_deref()) {
         return Ok(None);
     }
 
-    let api_key = env_or_process_value(env, "OPENROUTER_API_KEY")
-        .ok_or_else(|| "config: OPENROUTER_API_KEY required".to_string())?;
+    let api_key = match provider.required_env(env, "OPENROUTER_API_KEY")? {
+        Some(api_key) => api_key,
+        None => return Ok(None),
+    };
     let redaction_env = redaction_env_with_value(env, "OPENROUTER_API_KEY", &api_key);
     let url = openrouter_models_url_for_discovery(env);
     let response = client
