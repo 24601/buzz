@@ -364,6 +364,39 @@ pub fn effective_agent_command(
 mod overrides;
 pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
 
+/// Prefix of the typed dangling-harness error produced by
+/// `try_record_agent_command` / `resolve_effective_harness_descriptor`.
+///
+/// This sentinel is an internal Rust contract: user-facing surfaces must
+/// convert it to a sentence via [`user_facing_harness_error`] (spawn) or to
+/// the missing id via [`dangling_harness_id`] (summary) — never show it raw.
+pub(crate) const DANGLING_HARNESS_PREFIX: &str = "DANGLING_HARNESS_ID:";
+
+/// Extract the missing harness id from a `DANGLING_HARNESS_ID:<id>` error.
+/// Returns `None` for any other error string.
+pub(crate) fn dangling_harness_id(error: &str) -> Option<&str> {
+    error.strip_prefix(DANGLING_HARNESS_PREFIX)
+}
+
+/// Convert a harness-resolution error to a user-facing sentence. Dangling
+/// harness ids become an actionable message; other errors pass through.
+pub(crate) fn user_facing_harness_error(error: &str) -> String {
+    match dangling_harness_id(error) {
+        Some(id) => format!(
+            "harness \"{id}\" was deleted — pick a new harness for this agent or restore the harness definition"
+        ),
+        None => error.to_string(),
+    }
+}
+
+/// Summary-row display for a dangling harness id: shows the *missing* id so
+/// the agent list tells the same story as spawn (which refuses with the
+/// sentence above), rather than silently falling back to the default command
+/// as if the agent were healthy.
+pub(crate) fn dangling_harness_display(id: &str) -> String {
+    format!("harness (deleted): {id}")
+}
+
 /// Spawn-time variant of `record_agent_command` that returns a typed error when
 /// a record's `runtime` id or its persona's `runtime` id is set but cannot be
 /// resolved (i.e. the definition was deleted after the agent was created).
@@ -1496,7 +1529,7 @@ pub(crate) fn preset_harness_definitions(
 /// set from the single source of truth (`PRESET_HARNESSES`) rather than a
 /// hand-maintained copy.  Adding a preset automatically reserves its ID.
 pub(crate) fn preset_harness_ids() -> &'static [&'static str] {
-    // SAFETY: `PRESET_HARNESSES` is `'static`; we project its `id` fields.
+    // `PRESET_HARNESSES` is `'static`; we project its `id` fields.
     // Computed once via OnceLock to avoid repeated allocations on hot paths.
     use std::sync::OnceLock;
     static IDS: OnceLock<Vec<&'static str>> = OnceLock::new();
@@ -1585,10 +1618,6 @@ pub fn discover_acp_runtimes_from(
     let mut seen_ids: std::collections::HashSet<String> =
         entries.iter().map(|e| e.id.clone()).collect();
 
-    // Loaded (non-builtin) definitions collected for the registry.
-    let mut loaded_defs: Vec<crate::managed_agents::custom_harnesses::HarnessDefinition> =
-        Vec::new();
-
     // Phase 2.5: insert static preset entries (PATH-probed, not editable/deletable).
     for def in PRESET_HARNESSES {
         if seen_ids.contains(def.id) {
@@ -1636,30 +1665,15 @@ pub fn discover_acp_runtimes_from(
             // Preset entries have static, non-editable env; definition_env is empty.
             definition_env: Default::default(),
         });
-
-        // Register for spawn-time resolution.
-        loaded_defs.push(crate::managed_agents::custom_harnesses::HarnessDefinition {
-            id: def.id.to_string(),
-            label: def.label.to_string(),
-            command: def.command.to_string(),
-            args: def.args.iter().map(|s| s.to_string()).collect(),
-            env: Default::default(),
-            install_instructions_url: def.install_instructions_url.to_string(),
-            install_hint: def.install_hint.to_string(),
-        });
     }
 
     // Phase 3: load and append custom harness definitions.
     if let Some(dir) = custom_harnesses_dir {
+        // The loader applies collision + duplicate filtering at the boundary,
+        // so anything it returns is safe to surface in the catalog. Builtin
+        // shadowing is impossible here (check_id_collision covers builtins and
+        // presets); `seen_ids` guards only same-run duplicates.
         for def in crate::managed_agents::custom_harnesses::load_custom_harnesses(dir) {
-            // Collision check: a custom file must not shadow a built-in or preset id.
-            if let Err(reason) =
-                crate::managed_agents::custom_harnesses::check_id_collision(&def.id)
-            {
-                tracing::warn!("custom_harnesses: skipping {}: {reason}", def.id);
-                continue;
-            }
-            // Reject duplicates within the custom set itself or against presets.
             if !seen_ids.insert(def.id.clone()) {
                 tracing::warn!("custom_harnesses: skipping duplicate id {:?}", def.id);
                 continue;
@@ -1708,14 +1722,15 @@ pub fn discover_acp_runtimes_from(
                 // read it back — prevents silently erasing env on save.
                 definition_env: def.env.clone(),
             });
-
-            loaded_defs.push(def);
         }
     }
 
-    // Populate the loaded registry so spawn, readiness, and summary paths can
-    // resolve custom/preset harness commands without re-running discovery.
-    crate::managed_agents::custom_harnesses::update_loaded_harness_registry(loaded_defs);
+    // Publish the loaded-harness registry from a FRESH directory read under the
+    // persist mutex — never from the snapshot taken before the auth probes ran.
+    // A save/delete landing during Phase 2 already re-warmed the registry; a
+    // stale-snapshot publish here would clobber it (the just-saved harness
+    // would become unresolvable at spawn until the next discovery).
+    crate::managed_agents::custom_harnesses::warm_harness_registry_locked(custom_harnesses_dir);
 
     entries
 }

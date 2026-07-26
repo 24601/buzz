@@ -1507,6 +1507,96 @@ fn registry_edit_with_id_rename_old_dangling_new_resolved() {
     );
 }
 
+// ── Dangling-harness sentinel → user-facing surfaces ─────────────────────────
+
+/// The internal `DANGLING_HARNESS_ID:<id>` sentinel round-trips through
+/// `dangling_harness_id` and is never confused with other error strings.
+#[test]
+fn dangling_harness_id_extracts_id_and_rejects_other_errors() {
+    use super::{dangling_harness_id, DANGLING_HARNESS_PREFIX};
+    assert_eq!(
+        dangling_harness_id(&format!("{DANGLING_HARNESS_PREFIX}my-harness")),
+        Some("my-harness")
+    );
+    assert_eq!(dangling_harness_id("some other error"), None);
+    assert_eq!(dangling_harness_id(""), None);
+    // Prefix must anchor at the start — a wrapped sentinel is not a sentinel.
+    assert_eq!(
+        dangling_harness_id("cannot spawn: DANGLING_HARNESS_ID:x"),
+        None
+    );
+}
+
+/// Spawn surfaces the sentinel as an actionable sentence naming the id;
+/// non-sentinel errors pass through untouched.
+#[test]
+fn user_facing_harness_error_converts_sentinel_to_sentence() {
+    use super::{user_facing_harness_error, DANGLING_HARNESS_PREFIX};
+    let msg = user_facing_harness_error(&format!("{DANGLING_HARNESS_PREFIX}foo"));
+    assert!(
+        msg.contains("\"foo\"") && msg.contains("deleted"),
+        "sentence must name the missing harness, got: {msg}"
+    );
+    assert!(
+        !msg.contains(DANGLING_HARNESS_PREFIX),
+        "raw sentinel must never reach the user, got: {msg}"
+    );
+    assert_eq!(
+        user_facing_harness_error("plain failure"),
+        "plain failure",
+        "non-sentinel errors pass through"
+    );
+}
+
+/// Composed coherence test (delete → summary display → spawn sentence): after
+/// a harness is deleted, the single resolver errors with the sentinel, the
+/// summary path renders the *missing id* (not a silent buzz-agent fallback),
+/// and the spawn path renders the actionable sentence — both halves tell the
+/// same story from the same error.
+#[test]
+fn deleted_harness_summary_display_and_spawn_sentence_agree() {
+    use crate::managed_agents::custom_harnesses::{
+        delete_and_warm, registry_test_lock, save_and_warm,
+    };
+    use crate::managed_agents::{resolve_effective_harness_descriptor, GlobalAgentConfig};
+
+    let _lock = registry_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+
+    // Save a custom harness and pin a record to it.
+    let def = crate::managed_agents::custom_harnesses::HarnessDefinition {
+        id: "doomed".to_string(),
+        label: "Doomed".to_string(),
+        command: "doomed-bin".to_string(),
+        args: vec![],
+        env: Default::default(),
+        install_instructions_url: String::new(),
+        install_hint: String::new(),
+    };
+    save_and_warm(dir.path(), &def, None).unwrap();
+    let record = record_with(Some("doomed"), None, None);
+    let global = GlobalAgentConfig::default();
+    assert!(
+        resolve_effective_harness_descriptor(&record, &[], &global).is_ok(),
+        "must resolve before delete"
+    );
+
+    // Delete it — the shared resolver used by BOTH spawn and summary errors.
+    delete_and_warm(dir.path(), "doomed").unwrap();
+    let err = resolve_effective_harness_descriptor(&record, &[], &global).unwrap_err();
+
+    // Summary half: renders the missing id, never the default command.
+    let id = super::dangling_harness_id(&err).expect("resolver must emit the typed sentinel");
+    let display = super::dangling_harness_display(id);
+    assert_eq!(display, "harness (deleted): doomed");
+    assert!(!display.contains(&default_agent_command()));
+
+    // Spawn half: renders a sentence naming the same id, no raw sentinel.
+    let sentence = super::user_facing_harness_error(&err);
+    assert!(sentence.contains("\"doomed\"") && sentence.contains("deleted"));
+    assert!(!sentence.contains(super::DANGLING_HARNESS_PREFIX));
+}
+
 // ── I2: custom catalog entry carries definition_env for the edit round-trip ───
 
 /// A custom harness definition that includes env vars must surface those vars

@@ -931,7 +931,13 @@ pub async fn update_managed_agent(
 
         let summary = {
             let personas = load_personas(&app).unwrap_or_default();
-            build_managed_agent_summary(&app, record, &runtimes, &personas)?
+            build_managed_agent_summary(
+                &app,
+                record,
+                &runtimes,
+                &personas,
+                &crate::managed_agents::load_global_agent_config(&app).unwrap_or_default(),
+            )?
         };
         let rollback = name_changed.then(|| AgentUpdateRollback::new(previous_record, record));
         (summary, sync_params, rollback)

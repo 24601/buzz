@@ -418,20 +418,18 @@ pub(crate) fn valid_agent_runtime_receipt(
         receipt,
         instance_id,
         process_is_running,
-        process_belongs_to_us,
         process_has_buzz_marker,
     )
 }
 
 /// Injectable version of `valid_agent_runtime_receipt` for testing.
-/// `is_running(pid)`, `belongs_to_us(pid)`, and `has_marker(pid, instance_id)`
-/// can be substituted by test doubles without spawning real processes.
+/// `is_running(pid)` and `has_marker(pid, instance_id)` can be substituted by
+/// test doubles without spawning real processes.
 pub(crate) fn valid_agent_runtime_receipt_with(
     path: &std::path::Path,
     receipt: &super::ManagedAgentRuntimeReceipt,
     instance_id: &str,
     is_running: impl Fn(u32) -> bool,
-    belongs_to_us: impl Fn(u32) -> bool,
     has_marker: impl Fn(u32, &str) -> bool,
 ) -> bool {
     let Ok(canonical) =
@@ -445,14 +443,10 @@ pub(crate) fn valid_agent_runtime_receipt_with(
         && receipt.desktop_instance_id == instance_id
         && is_running(receipt.pid)
         // Receipts are written by THIS instance at spawn time, so they are
-        // Buzz-owned by construction. Use the shared ownership predicate
-        // (marker-only) so custom-harness binaries (not in KNOWN_AGENT_BINARIES)
-        // are not rejected here. `belongs_to_us` is passed as the fast-
-        // path hint but ignored by `buzz_sweep_owns_process`.
-        && buzz_sweep_owns_process(
-            belongs_to_us(receipt.pid),
-            has_marker(receipt.pid, &receipt.desktop_instance_id),
-        )
+        // Buzz-owned by construction. Marker-only ownership: custom-harness
+        // binaries (not in KNOWN_AGENT_BINARIES) must not be rejected by a
+        // name gate — see the sweep ownership rule above.
+        && has_marker(receipt.pid, &receipt.desktop_instance_id)
 }
 
 fn terminate_runtime_receipt_with(
@@ -610,28 +604,16 @@ const _: () = assert!(std::mem::size_of::<BSDInfo>() == 136);
 #[cfg(target_os = "macos")]
 pub(super) const PROC_PIDTBSDINFO: libc::c_int = 3;
 
-// ── Shared sweep ownership predicate ─────────────────────────────────────────
+// ── Sweep ownership rule ──────────────────────────────────────────────────────
 //
-// `BUZZ_MANAGED_AGENT` env marker is the sole authoritative ownership proof.
-// The `_belongs_to_us` name-check is passed by callers but is intentionally
-// IGNORED — custom harnesses have arbitrary binary names and would be missed
-// by a name-gated predicate.
-
-/// Returns `true` when a process should be included in the orphan sweep.
-///
-/// The `BUZZ_MANAGED_AGENT` env marker is the sole authoritative ownership
-/// proof — any process carrying it and belonging to this instance is swept,
-/// regardless of binary name.  The `_belongs_to_us` parameter is accepted
-/// for call-site symmetry but is intentionally ignored: the function returns
-/// `has_buzz_marker` unconditionally.  On Windows no `/proc`-based sweep
-/// runs, so `process_has_buzz_marker` always returns `false`.
-///
-/// This predicate is cross-platform and tested directly in the unit tests
-/// below — no `#[cfg(unix)]` guard needed here.
-pub(crate) fn buzz_sweep_owns_process(_belongs_to_us: bool, has_buzz_marker: bool) -> bool {
-    // Marker is the sole authoritative ownership gate.
-    has_buzz_marker
-}
+// The `BUZZ_MANAGED_AGENT` env marker is the SOLE authoritative ownership
+// proof for sweep/receipt decisions. Do NOT name-gate via
+// `process_belongs_to_us` here — custom harnesses use arbitrary binary names
+// and a name-gated predicate would silently leak their orphans (the old Linux
+// AND-gate bug). `process_belongs_to_us` remains in use only as a cheap
+// pre-check on paths that already know the binary (see runtime/stop.rs).
+// On Windows no `/proc`-based sweep runs, so `process_has_buzz_marker`
+// always returns `false`.
 
 /// Enumerate all processes on the system owned by the current user and kill any
 /// agent binary stamped with *this* instance's `BUZZ_MANAGED_AGENT` marker
@@ -677,13 +659,7 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         }
         // Custom harnesses don't match KNOWN_AGENT_BINARIES by name; the
         // BUZZ_MANAGED_AGENT env marker is the authoritative ownership proof.
-        // `buzz_sweep_owns_process` returns `has_buzz_marker` — the
-        // `_belongs_to_us` argument is accepted for call-site symmetry but
-        // is intentionally ignored (see the function's doc comment).
-        if !buzz_sweep_owns_process(
-            process_belongs_to_us(upid),
-            process_has_buzz_marker(upid, instance_id),
-        ) {
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
@@ -742,13 +718,9 @@ pub(crate) fn sweep_system_agent_processes(instance_id: &str, skip_pids: &[u32])
         if meta.uid() != my_uid {
             continue;
         }
-        // Same ownership predicate as macOS: marker is the authoritative gate,
-        // `_belongs_to_us` is accepted for call-site symmetry but ignored.
+        // Same ownership rule as macOS: the marker is the authoritative gate.
         // Fixes custom-harness orphan cleanup on Linux.
-        if !buzz_sweep_owns_process(
-            process_belongs_to_us(upid),
-            process_has_buzz_marker(upid, instance_id),
-        ) {
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
@@ -851,10 +823,7 @@ pub(crate) fn collect_same_instance_orphans(
         }
         // Custom harnesses don't match KNOWN_AGENT_BINARIES by name; the
         // BUZZ_MANAGED_AGENT env marker is the authoritative ownership proof.
-        if !buzz_sweep_owns_process(
-            process_belongs_to_us(upid),
-            process_has_buzz_marker(upid, instance_id),
-        ) {
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
@@ -900,13 +869,9 @@ pub(crate) fn collect_same_instance_orphans(
         if meta.uid() != my_uid {
             continue;
         }
-        // Same ownership predicate as macOS: marker is the authoritative gate,
-        // `_belongs_to_us` is accepted for call-site symmetry but ignored.
+        // Same ownership rule as macOS: the marker is the authoritative gate.
         // Fixes custom-harness orphan cleanup on Linux.
-        if !buzz_sweep_owns_process(
-            process_belongs_to_us(upid),
-            process_has_buzz_marker(upid, instance_id),
-        ) {
+        if !process_has_buzz_marker(upid, instance_id) {
             continue;
         }
         // Live descendants of a tracked harness are exempt — see sweep::is_live_descendant_*.
@@ -1469,6 +1434,7 @@ pub fn build_managed_agent_summary(
     record: &ManagedAgentRecord,
     runtimes: &HashMap<ManagedAgentRuntimeKey, ManagedAgentPairRuntime>,
     personas: &[crate::managed_agents::types::AgentDefinition],
+    global_config: &crate::managed_agents::GlobalAgentConfig,
 ) -> Result<ManagedAgentSummary, String> {
     use crate::managed_agents::BackendKind;
 
@@ -1547,12 +1513,15 @@ pub fn build_managed_agent_summary(
     // stamped at spawn.  This catches out-of-band adapter changes (manual
     // npm install/downgrade) that Phase-1 auto-restart doesn't cover.  The
     // cache is read-only here — no subprocess is spawned.
+    //
+    // Global config drives both the restart-drift hash and descriptor env
+    // layering below — the caller loads it once and passes it in, so
+    // list-style callers pay one disk read per call rather than one per record.
+
     let needs_restart = pair_key
         .as_ref()
         .and_then(|key| runtimes.get(key).map(|runtime| (key, runtime)))
         .is_some_and(|(key, runtime)| {
-            let global_for_hash =
-                crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
             let teams_for_hash = crate::managed_agents::load_teams(app).unwrap_or_default();
             let hash_drift = runtime.spawn_config_hash
                 != crate::managed_agents::spawn_hash::spawn_config_hash(
@@ -1560,7 +1529,7 @@ pub fn build_managed_agent_summary(
                     personas,
                     &teams_for_hash,
                     &key.relay_url,
-                    &global_for_hash,
+                    global_config,
                 );
             let availability_drift = super::availability_drift(
                 runtime.adapter_availability.as_ref(),
@@ -1571,18 +1540,19 @@ pub fn build_managed_agent_summary(
 
     // Resolve the effective harness via the single typed descriptor — same resolver
     // as spawn, so the UI reflects the persona's current harness (or explicit pin).
-    // Global config is loaded here for descriptor parity with spawn (env layering).
-    let global_for_summary =
-        crate::managed_agents::load_global_agent_config(app).unwrap_or_default();
     let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
         record,
         personas,
-        &global_for_summary,
+        global_config,
     )
-    .unwrap_or_else(|_| {
-        // Dangling harness — show a best-effort command so the UI displays the
-        // record's configured runtime id rather than crashing.
-        let cmd = crate::managed_agents::record_agent_command(record, personas);
+    .unwrap_or_else(|e| {
+        // Dangling harness — surface the missing id so the UI tells the same
+        // story as spawn (which refuses with a sentence), rather than silently
+        // showing the default-command fallback as if the agent were healthy.
+        let cmd = match crate::managed_agents::dangling_harness_id(&e) {
+            Some(id) => crate::managed_agents::dangling_harness_display(id),
+            None => crate::managed_agents::record_agent_command(record, personas),
+        };
         let args = normalize_agent_args(&cmd, record.agent_args.clone());
         crate::managed_agents::readiness::EffectiveHarnessDescriptor {
             command: cmd,
@@ -1599,6 +1569,7 @@ pub fn build_managed_agent_summary(
         pubkey: record.pubkey.clone(),
         name: record.name.clone(),
         persona_id: record.persona_id.clone(),
+        runtime: record.runtime.clone(),
         team_id: record.team_id.clone(),
         relay_url: record.relay_url.clone(),
         acp_command: record.acp_command.clone(),
@@ -1776,7 +1747,13 @@ pub fn spawn_agent_child(
     // model probes all consume this descriptor rather than assembling values inline.
     let descriptor =
         crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
-            .map_err(|e| format!("cannot spawn agent {}: {e}", record.pubkey))?;
+            .map_err(|e| {
+                format!(
+                    "cannot spawn agent {}: {}",
+                    record.pubkey,
+                    crate::managed_agents::user_facing_harness_error(&e)
+                )
+            })?;
     let effective_command = &descriptor.command;
     let agent_args = &descriptor.args;
     let resolved_acp_command = resolve_command(&record.acp_command)
