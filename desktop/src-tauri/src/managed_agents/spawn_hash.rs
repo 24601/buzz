@@ -28,22 +28,12 @@
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::{
+    effective_config::{resolve_effective_config, EffectiveConfigResult},
     known_acp_runtime, normalize_agent_args,
-    persona_events::apply_persona_snapshot,
+    persona_events::preview_prospective_persona_snapshot,
     types::{AgentDefinition, ManagedAgentRecord, TeamRecord},
     GlobalAgentConfig,
 };
-
-/// The prompt a spawn would actually deliver: `Some("")` collapses to `None`
-/// because an empty `BUZZ_ACP_SYSTEM_PROMPT` is no prompt.
-///
-/// The single source of truth for the spawn env write AND the config hash.
-pub(crate) fn effective_spawn_prompt(record: &ManagedAgentRecord) -> Option<String> {
-    record
-        .system_prompt
-        .clone()
-        .filter(|prompt| !prompt.is_empty())
-}
 
 /// Resolve the current instructions for this instance's deployment-time team binding.
 /// A deleted team deliberately degrades to no team section.
@@ -75,14 +65,9 @@ pub(crate) fn spawn_config_hash(
     // restart would actually run. Idempotent, so the spawn-time stamp
     // (post-snapshot record) and later recomputes (persisted record) agree
     // when nothing changed. The persona env itself reaches the hash through
-    // `resolve_effective_agent_env` below; `persona_source_version` is set on
+    // the descriptor's layered env below; `persona_source_version` is set on
     // the clone but is not a hash input.
-    let mut record = record.clone();
-    if let Some(persona_id) = record.persona_id.clone() {
-        if let Some(persona) = personas.iter().find(|p| p.id == persona_id) {
-            apply_persona_snapshot(&mut record, persona);
-        }
-    }
+    let record = preview_prospective_persona_snapshot(record, personas);
     let record = &record;
 
     // Resolve command, args, and env via the single typed descriptor — same path
@@ -101,9 +86,6 @@ pub(crate) fn spawn_config_hash(
                 }
             });
     let runtime_meta = known_acp_runtime(&descriptor.command);
-
-    // `resolve_effective_agent_env` now includes definition env as a floor
-    // layer (below global/persona/agent), mirroring spawn_agent_child exactly.
 
     let mut hasher = DefaultHasher::new();
 
@@ -124,11 +106,24 @@ pub(crate) fn spawn_config_hash(
     // resolved: every record spawns on the workspace relay (legacy pins
     // ignored), so a workspace relay change must trip the badge.
     crate::relay::effective_agent_relay_url(&record.relay_url, workspace_relay).hash(&mut hasher);
-    // Prompt and runtime-layered team instructions use the same resolver as spawn.
-    effective_spawn_prompt(record).hash(&mut hasher);
+    // Team instructions use the same resolver as spawn.
     effective_team_instructions(record, teams).hash(&mut hasher);
-    record.model.hash(&mut hasher);
-    record.provider.hash(&mut hasher);
+    // Prompt, model, and provider all come from ONE `resolve_effective_config`
+    // call — the SAME resolve `spawn_agent_child` performs for the env write,
+    // so env write and this badge cannot disagree. An orphaned link (missing
+    // definition) hashes as if all three were absent: `spawn_agent_child`
+    // refuses to spawn an orphan regardless, so this is a display-only
+    // convenience, not the spawn gate.
+    let (resolved_prompt, resolved_model, resolved_provider) =
+        match resolve_effective_config(record, personas, global) {
+            EffectiveConfigResult::Resolved(cfg) => {
+                (cfg.system_prompt.value, cfg.model.value, cfg.provider.value)
+            }
+            EffectiveConfigResult::OrphanedInstance { .. } => (None, None, None),
+        };
+    resolved_prompt.hash(&mut hasher);
+    resolved_model.hash(&mut hasher);
+    resolved_provider.hash(&mut hasher);
     record.auth_tag.hash(&mut hasher);
     record.respond_to.as_str().hash(&mut hasher);
     // The allowlist is hashed as the env receives it: spawn sets

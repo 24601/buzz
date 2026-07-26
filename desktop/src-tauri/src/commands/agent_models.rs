@@ -89,13 +89,21 @@ pub async fn get_agent_models(
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| descriptor.command.clone());
 
-        let discovery_model = record.model.clone();
-        // The record's saved provider is a deliberate choice and wins; when the
-        // record has none, `effective_discovery_provider` below recovers the
-        // provider the agent will actually launch with from the runtime's own
-        // provider env var, read out of the descriptor env (which already
-        // layers definition/persona/global values the same way spawn does).
-        let discovery_provider = record.provider.clone();
+        // ModelPicker can persist a selected model but not rewrite the saved
+        // provider/env snapshot, and runtime spawn reads that same snapshot.
+        // Model and provider come from the same authoritative resolver spawn
+        // uses (`resolve_effective_model_provider`) — linked instances read
+        // their definition, never a stale materialized `record.model` /
+        // `record.provider`, so discovery cannot query a provider this agent
+        // will not actually launch with. Definition-less instances keep their
+        // own record values, matching spawn's `resolve_definition_less` arm.
+        // When the resolver yields no provider, `effective_discovery_provider`
+        // below recovers the provider the agent will actually launch with from
+        // the runtime's own provider env var, read out of the descriptor env
+        // (which already layers definition/persona/global values the same way
+        // spawn does).
+        let (discovery_model, discovery_provider) =
+            crate::managed_agents::resolve_effective_model_provider(record, &personas, &global);
         let discovery_provider_env_var =
             known_acp_runtime(&descriptor.command).and_then(|meta| meta.provider_env_var);
         let discovery_env = descriptor.env;
@@ -777,6 +785,35 @@ async fn discover_databricks_models(
     }))
 }
 
+/// Apply an `UpdateManagedAgentRequest`'s model/provider/system_prompt patch
+/// to `record`, enforcing the linked-instance write guard: a definition-linked
+/// record's model/provider/prompt are definition-authoritative (see
+/// `effective_config::resolve_linked`), so writes to these three fields are
+/// silently dropped for a linked instance rather than persisting a byte the
+/// resolver will never read. Definition-less instances accept the patch
+/// as-is. Extracted so the guard is exercised by both `update_managed_agent`
+/// and its regression tests — a test that reimplements this check instead of
+/// calling it can go green after the real guard is deleted.
+fn apply_model_provider_prompt_update(
+    record: &mut crate::managed_agents::ManagedAgentRecord,
+    model: Option<Option<String>>,
+    provider: Option<Option<String>>,
+    system_prompt: Option<Option<String>>,
+) {
+    if record.persona_id.is_some() {
+        return;
+    }
+    if let Some(model_update) = model {
+        record.model = model_update;
+    }
+    if let Some(provider_update) = provider {
+        record.provider = provider_update;
+    }
+    if let Some(prompt_update) = system_prompt {
+        record.system_prompt = prompt_update;
+    }
+}
+
 /// Update mutable fields on an existing managed agent record.
 ///
 /// Does NOT auto-restart the agent. Runtime config changes (system prompt,
@@ -816,15 +853,12 @@ pub async fn update_managed_agent(
                 name_changed = true;
             }
         }
-        if let Some(model_update) = input.model {
-            record.model = model_update;
-        }
-        if let Some(provider_update) = input.provider {
-            record.provider = provider_update;
-        }
-        if let Some(prompt_update) = input.system_prompt {
-            record.system_prompt = prompt_update;
-        }
+        apply_model_provider_prompt_update(
+            record,
+            input.model,
+            input.provider,
+            input.system_prompt,
+        );
         if let Some(parallelism) = input.parallelism {
             record.parallelism = parallelism;
         }

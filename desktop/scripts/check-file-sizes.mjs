@@ -80,10 +80,16 @@ const overrides = new Map([
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
   // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
-  // +47: review fix for #2773 — load_global_agent_config hoisted out of
+  // +29 (1340 -> 1369, main): agent-config-resolver — start_local_agent_with_preflight
+  // uses resolve_effective_relay_mesh_model_id at both preflight call sites;
+  // preview_prospective_persona_snapshot helper extracted; orphan guard threaded
+  // through restore path; start_local_agent_pairs_with_preflight resolver
+  // preflight. Load-bearing feature changes; queued to split.
+  // +47 (#2773): review fix — load_global_agent_config hoisted out of
   // build_managed_agent_summary into callers, dangling-harness summaries render
   // the deleted id, and spawn errors surface as sentences (tests included).
-  ["src-tauri/src/commands/agents.rs", 1387],
+  // +1: merge of the two deltas above (actual post-merge count).
+  ["src-tauri/src/commands/agents.rs", 1418],
   // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
@@ -171,11 +177,18 @@ const overrides = new Map([
   // Windows PATH-correctness fix: 3 #[cfg(windows)] test functions covering
   // .cmd shim rejection, .bat shim rejection, and .exe acceptance for
   // configure_runtime_cli (fix #2397). Test-only growth; queued to split.
+  // +7 (main): this PR's resolver tests land on top of main's #2397 Windows
+  // shim tests, plus main's restart_eligible orphan-gate tests.
   // +34: BYOH custom-harness sweep condition unit tests — 3 tests validating
   // the OR-gate fix for custom-binary orphan cleanup.
   // +26: BYOH pass-2 I3 — 2 collector-decision tests for receipt path
   // ownership (valid_agent_runtime_receipt uses buzz_sweep_owns_process).
   ["src-tauri/src/managed_agents/runtime/tests.rs", 1320],
+  // runtime.rs re-entered the list after the #1968 merge: main's
+  // definition-authoritative resolver comments grew it to 982, and this PR's
+  // typed harness-descriptor resolution in spawn_agent_child (+38) lands on
+  // top. Queued to shrink with the next runtime split pass (#2974 follow-up).
+  ["src-tauri/src/managed_agents/runtime.rs", 1020],
   // applyWorkspace reposDir parameter plus the validateReposDir binding,
   // threaded through Tauri invokes for configurable repos_dir, plus the
   // harness-persona-sync `harnessOverride` create-input bit — load-bearing
@@ -210,7 +223,8 @@ const overrides = new Map([
   // mapper. This is the existing API boundary; split remains queued.
   // team-instructions-first-class: createManagedAgent Tauri bridge threads the
   // new teamId input through to the backend (+1 line).
-  ["src/shared/api/tauri.ts", 1305],
+  // +2 for model_source field in RawManagedAgent + fromRawManagedAgent mapping.
+  ["src/shared/api/tauri.ts", 1307],
   // doctor-npm-eacces-preflight: hint field added to InstallStepResult (+1 line).
   // codex-acp-package-swap: "adapter_outdated" variant added to AcpAvailabilityStatus (+1 line).
   // doctor-install-reliability: AuthStatus tagged union + nodeRequired/authStatus/
@@ -232,21 +246,7 @@ const overrides = new Map([
   // (#2680) to indicate runtimes that need a separate CLI install.
   // +6: ManagedAgent.runtime record-level pin + JSDoc so the harness delete
   // confirmation can count referencing agents (review fix for #2773).
-  ["src/shared/api/types.ts", 1057],
-  // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
-  // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
-  // shows required markers and credential amber rows (parity with
-  // CreateAgentDialog). +23 lines of gate wiring. Queued to split.
-  // config-bridge-aware requirements: useRuntimeFileConfigQuery wiring adds
-  // ~16 lines. Queued to split.
-  // baked-env-required-badge: useBakedBuildEnvKeysQuery + bakedEnvKeys wiring
-  // + correct exclusion-semantics for requiredEnvKeys adds ~14 lines.
-  // +2 lines: filter managed provider key from requiredEnvKeys (suppress dead-input locked row).
-  // global-agent-config parity: wire useGlobalAgentConfig into PersonaDialog
-  // (Gap A: global-aware computeLocalModeGate + drop bare requiredCredentialEnvKeys;
-  // Gap B: hasAutoOpenedAdvancedRef auto-expand effect) + effective-provider
-  // save gate + Inherit/Select-a-provider label. Queued to split.
-  ["src/features/agents/ui/PersonaDialog.tsx", 1080],
+  ["src/shared/api/types.ts", 1058],
   // harness-persona-sync feature growth, queued to split in the resolver-unify
   // refactor followup. discovery.rs is dominated by the new test module
   // (the effective_agent_command / divergent / create-time override matrix);
@@ -524,10 +524,19 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  // +1: review round 2 (#2773) — model_discovery_error helper routes dangling-
-  // harness resolution errors through user_facing_harness_error (sentence, not
-  // raw DANGLING_HARNESS_ID sentinel) for the get_agent_models surface.
-  ["src-tauri/src/commands/agent_models.rs", 1080],
+  // +22 (1079 -> 1101, main): Finding 2 — model discovery now resolves through
+  // resolve_effective_model_provider instead of raw record bytes, plus
+  // apply_model_provider_prompt_update's linked-instance write-guard
+  // extraction and its regression tests.
+  // +4 (1101 -> 1105): rebase onto agents-everywhere — agents.rs function
+  // signatures updated for ManagedAgentRuntimeKey-keyed runtimes map.
+  // +1 (#2773): model_discovery_error helper routes dangling-harness
+  // resolution errors through user_facing_harness_error (sentence, not raw
+  // DANGLING_HARNESS_ID sentinel) for the get_agent_models surface. The PR's
+  // descriptor path also deletes saved_agent_model_discovery_config, whose
+  // callers now use resolve_effective_model_provider + the descriptor env
+  // directly (net wash after the merge of the deltas above).
+  ["src-tauri/src/commands/agent_models.rs", 1114],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
@@ -543,7 +552,12 @@ const overrides = new Map([
   // relay from the harness-attached payload relayUrl (with effective-relay
   // fallback for older harnesses) instead of a required arg the frontend
   // wrapper never passed, which silently broke the session-config cache.
-  ["src-tauri/src/commands/agent_config.rs", 1050],
+  // +60 (1050 -> 1110): agent-config-resolver — resolve_config_surface now
+  // clears a linked instance's own system_prompt/model/provider before
+  // computing had_* so stale materialized snapshot bytes can never be tagged
+  // BuzzExplicit and shadow the definition/global fallthrough; the dead
+  // persona-model re-tag branch replaced; two new regression tests added.
+  ["src-tauri/src/commands/agent_config.rs", 1110],
   // codex-install-auto-restart review-fixes: should_restart_after_install
   // takes pid_alive:bool (pure predicate, no OS-dependent call); 3 racy
   // cache tests replaced with 6 pure availability_drift predicate tests;
@@ -565,9 +579,20 @@ const overrides = new Map([
   // Includes unit tests for detection, routing, and -Command body preservation.
   // +16: test_powershell_command_goose_catalog_dequoted proves the \$→$ escape
   // fix for the Goose Windows installer (PR #2680 interaction with #2750).
-  // +126: BYOH — save_custom_harness (validate, atomic write, return entry) +
-  // delete_custom_harness (id-guard, builtin reject, remove file) commands;
-  // discover_acp_providers updated to pass AppHandle + custom_harnesses dir.
+  // +10: pass an explicit PATH through Codex adapter install planning so unit
+  // tests avoid the process-global login-shell PATH cache.
+  // +59 (main): run install commands under `pipefail` so a failing `curl` in a
+  // `curl … | bash` install fails the `cli` step instead of being masked by
+  // `bash`'s exit 0, plus tests for the arg shape and the real pipeline status.
+  // +81 (main): install_shell_args re-exports the composed PATH inside the command
+  // body so login startup files can't clear or reorder it, plus an isolated
+  // hostile-profile regression the pure composition tests structurally miss.
+  // +42 (main): gate that re-export off Windows, where join_paths is `;`-separated
+  // and bash would collapse it into one entry, plus a platform-shape test.
+  // +126 (#2773): BYOH — save_custom_harness (validate, atomic write, return
+  // entry) + delete_custom_harness (id-guard, builtin reject, remove file)
+  // commands; discover_acp_providers updated to pass AppHandle +
+  // custom_harnesses dir.
   // +30: BYOH F5 — atomic-write-file dep, original_id rename/delete support.
   // +13: BYOH pass-2 C1 — warm_harness_registry_from_dir call in save and
   // delete commands now verifies transactional registry refresh.
@@ -575,10 +600,7 @@ const overrides = new Map([
   // return value so the frontend immediately has the updated env.
   // +1: rebase over main (#2680) — requires_external_cli: false added to
   // save_custom_harness catalog entry construction (new required field).
-  // +10: merge of main (#2767) — pass an explicit PATH through Codex adapter
-  // install planning so unit tests avoid the process-global login-shell PATH
-  // cache. Independent of the BYOH growth above; the two deltas compose.
-  ["src-tauri/src/commands/agent_discovery.rs", 2048],
+  ["src-tauri/src/commands/agent_discovery.rs", 2167],
   // draft-persistence predicate: submit-time `loadDraft` check + inline comment
   // + deps-array entry in submitMessage closes the never-persisted-boundary
   // defect (Thufir Pass-3 finding). Load-bearing correctness fix; queued to
@@ -624,7 +646,9 @@ const overrides = new Map([
   // for Databricks v1 gate; prospectiveRuntimeId default fallback for builtins.
   // PR-B moves default/API-key derivation into shared hooks; the explicit
   // hidden-key projection keeps the top-level secret out of Advanced rows.
-  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1195],
+  // +6 (1195 -> 1201): rebase onto main — this PR's model-source label wiring
+  // lands on top of main's dialog growth. Queued to split.
+  ["src/features/agents/ui/AgentInstanceEditDialog.tsx", 1201],
   // AgentDefinitionDialog grew past 1000 with the following load-bearing fixes:
   // isRuntimeAutoSeededRef tracking for edit-mode seeding (Fizz shows models);
   // runtimeSupportsLlmProviderSelection guard on discovery provider (codex fix);
