@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 import { mkdirSync } from "node:fs";
 
 import { installMockBridge } from "../helpers/bridge";
@@ -9,6 +9,31 @@ const SCREENSHOT_DIR = "test-results/mobile-pairing-qr";
 test.beforeEach(async ({ page }) => {
   await installMockBridge(page, { pairingStartDelayMs: 300 });
 });
+
+async function emitPairingEvent(page: Page, event: string, payload?: unknown) {
+  await page.evaluate(
+    async ({ eventName, eventPayload }) => {
+      const internals = (
+        window as Window & {
+          __TAURI_INTERNALS__?: {
+            invoke?: (
+              command: string,
+              args: Record<string, unknown>,
+            ) => Promise<unknown>;
+          };
+        }
+      ).__TAURI_INTERNALS__;
+      if (!internals?.invoke) {
+        throw new Error("Tauri E2E event bridge is unavailable");
+      }
+      await internals.invoke("plugin:event|emit", {
+        event: eventName,
+        payload: eventPayload,
+      });
+    },
+    { eventName: event, eventPayload: payload },
+  );
+}
 
 test("mobile pairing starts on demand and reveals the QR code", async ({
   page,
@@ -103,26 +128,8 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
     0.5,
   );
 
-  await page.evaluate(async () => {
-    const internals = (
-      window as Window & {
-        __TAURI_INTERNALS__?: {
-          invoke?: (
-            command: string,
-            args: Record<string, unknown>,
-          ) => Promise<unknown>;
-        };
-      }
-    ).__TAURI_INTERNALS__;
-    if (!internals?.invoke) {
-      throw new Error("Tauri E2E event bridge is unavailable");
-    }
-    await internals.invoke("plugin:event|emit", {
-      event: "pairing-error",
-      payload: {
-        message: "Session timed out",
-      },
-    });
+  await emitPairingEvent(page, "pairing-error", {
+    message: "Session timed out",
   });
 
   await expect(qrCode).toHaveCount(0);
@@ -149,4 +156,30 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   await waitForAnimations(page);
   await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-card.png` });
   await qrCode.screenshot({ path: `${SCREENSHOT_DIR}/pairing-qr.png` });
+});
+
+test("late pairing events are ignored after canceling", async ({ page }) => {
+  await page.goto("/");
+  await page.getByTestId("open-settings").click();
+  await page.getByTestId("profile-popover-settings").click();
+  await page.getByTestId("settings-nav-mobile").click();
+
+  const card = page.getByTestId("mobile-pairing-card");
+  await card.getByTestId("start-pairing-button").click();
+  await expect(page.getByTestId("mobile-pairing-qr")).toBeVisible();
+
+  await emitPairingEvent(page, "pairing-sas-received", { sas: "123456" });
+  const dialog = page.getByTestId("mobile-pairing-dialog");
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Close" }).click();
+
+  await expect(dialog).toHaveCount(0);
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
+
+  await emitPairingEvent(page, "pairing-complete");
+  await emitPairingEvent(page, "pairing-sas-received", { sas: "654321" });
+
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByTestId("mobile-pairing-done")).toHaveCount(0);
+  await expect(card.getByText("Pairing was canceled.")).toBeVisible();
 });

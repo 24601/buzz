@@ -179,11 +179,13 @@ export function MobilePairingCard({
   const [sasCode, setSasCode] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
+  const pairingActiveRef = useRef(false);
   const stepRef = useRef(step);
   stepRef.current = step;
 
   const beginPairing = useCallback(() => {
     const requestId = ++requestIdRef.current;
+    pairingActiveRef.current = true;
     setStep("generating");
     setQrUri(null);
     setSasCode(null);
@@ -198,6 +200,7 @@ export function MobilePairingCard({
       },
       (err) => {
         if (requestId === requestIdRef.current) {
+          pairingActiveRef.current = false;
           setError(pairingErrorMessage(err));
           setStep("error");
         }
@@ -207,6 +210,7 @@ export function MobilePairingCard({
 
   useEffect(() => {
     ++requestIdRef.current;
+    pairingActiveRef.current = false;
     setStep("idle");
     setQrUri(null);
     setSasCode(null);
@@ -220,7 +224,7 @@ export function MobilePairingCard({
     const unlisteners: (() => void)[] = [];
 
     listen<{ sas: string }>("pairing-sas-received", (event) => {
-      if (!cancelled) {
+      if (!cancelled && pairingActiveRef.current) {
         setSasCode(event.payload.sas);
         setStep("sas");
       }
@@ -230,7 +234,8 @@ export function MobilePairingCard({
     });
 
     listen("pairing-complete", () => {
-      if (!cancelled) {
+      if (!cancelled && pairingActiveRef.current) {
+        pairingActiveRef.current = false;
         setStep("done");
       }
     }).then((fn) => {
@@ -239,7 +244,8 @@ export function MobilePairingCard({
     });
 
     listen<{ reason: string }>("pairing-aborted", (event) => {
-      if (!cancelled) {
+      if (!cancelled && pairingActiveRef.current) {
+        pairingActiveRef.current = false;
         setError(`Pairing stopped: ${event.payload.reason}`);
         setStep("error");
       }
@@ -249,7 +255,8 @@ export function MobilePairingCard({
     });
 
     listen<{ message: string }>("pairing-error", (event) => {
-      if (!cancelled) {
+      if (!cancelled && pairingActiveRef.current) {
+        pairingActiveRef.current = false;
         if (isPairingSessionTimeout(event.payload.message)) {
           setQrUri(null);
           setSasCode(null);
@@ -269,6 +276,7 @@ export function MobilePairingCard({
     return () => {
       cancelled = true;
       ++requestIdRef.current;
+      pairingActiveRef.current = false;
       for (const fn of unlisteners) fn();
       if (stepRef.current !== "idle" && stepRef.current !== "done") {
         cancelPairing().catch(() => {});
@@ -292,17 +300,20 @@ export function MobilePairingCard({
           ? err.message
           : "We couldn't send your identity. Try again.",
       );
+      pairingActiveRef.current = false;
       setStep("error");
     }
   }
 
   function handleDenySas() {
+    pairingActiveRef.current = false;
     cancelPairing().catch(() => {});
     setError("The codes didn't match. Pairing was canceled.");
     setStep("error");
   }
 
   function handleStatusDialogClose() {
+    pairingActiveRef.current = false;
     if (stepRef.current === "done") {
       setStep("idle");
       setQrUri(null);
