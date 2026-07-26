@@ -103,6 +103,50 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
     0.5,
   );
 
+  await page.evaluate(async () => {
+    const internals = (
+      window as Window & {
+        __TAURI_INTERNALS__?: {
+          invoke?: (
+            command: string,
+            args: Record<string, unknown>,
+          ) => Promise<unknown>;
+        };
+      }
+    ).__TAURI_INTERNALS__;
+    if (!internals?.invoke) {
+      throw new Error("Tauri E2E event bridge is unavailable");
+    }
+    await internals.invoke("plugin:event|emit", {
+      event: "pairing-error",
+      payload: {
+        message: "Session timed out",
+      },
+    });
+  });
+
+  await expect(qrCode).toHaveCount(0);
+  await expect(copyButton).toHaveCount(0);
+  await expect(card.getByText("Pairing code expired.")).toBeVisible();
+
+  const regenerateButton = card.getByTestId("regenerate-pairing-button");
+  await expect(regenerateButton).toHaveText("Generate new pairing code");
+  await waitForAnimations(page);
+  await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-expired.png` });
+  await regenerateButton.click();
+  await expect(loadingSpinner).toBeVisible();
+  await expect(qrCode).toBeVisible();
+  await expect(copyButton).toBeVisible();
+  expect(
+    await page.evaluate(
+      () =>
+        (window.__BUZZ_E2E_COMMAND_LOG__ ?? []).filter(
+          (entry) => entry.command === "start_pairing",
+        ).length,
+    ),
+  ).toBe(2);
+
+  await waitForAnimations(page);
   await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-card.png` });
   await qrCode.screenshot({ path: `${SCREENSHOT_DIR}/pairing-qr.png` });
 });

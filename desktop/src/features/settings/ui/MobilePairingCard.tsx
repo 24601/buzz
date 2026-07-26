@@ -3,6 +3,7 @@ import {
   Check,
   Copy,
   LoaderCircle,
+  RefreshCw,
   ShieldCheck,
   TriangleAlert,
   X,
@@ -32,6 +33,7 @@ type PairingStep =
   | "idle"
   | "generating"
   | "qr"
+  | "expired"
   | "sas"
   | "transferring"
   | "done"
@@ -50,6 +52,10 @@ function pairingErrorMessage(error: unknown) {
   }
 
   return message || "We couldn't start pairing. Try again.";
+}
+
+function isPairingSessionTimeout(message: string) {
+  return message.toLowerCase().includes("session timed out");
 }
 
 function PairingStatusDialog({
@@ -244,6 +250,14 @@ export function MobilePairingCard({
 
     listen<{ message: string }>("pairing-error", (event) => {
       if (!cancelled) {
+        if (isPairingSessionTimeout(event.payload.message)) {
+          setQrUri(null);
+          setSasCode(null);
+          setError(null);
+          setStep("expired");
+          return;
+        }
+
         setError(pairingErrorMessage(event.payload.message));
         setStep("error");
       }
@@ -333,6 +347,22 @@ export function MobilePairingCard({
                 title="Mobile pairing QR code"
                 value={qrUri}
               />
+            ) : step === "expired" ? (
+              <div className="flex max-w-52 origin-center animate-in flex-col items-center gap-3 text-center fade-in-0 zoom-in-95 duration-[250ms] ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:animate-none">
+                <p className="text-sm text-muted-foreground">
+                  Pairing code expired.
+                </p>
+                <Button
+                  data-testid="regenerate-pairing-button"
+                  onClick={beginPairing}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCw className="mr-1.5 h-4 w-4" />
+                  Generate new pairing code
+                </Button>
+              </div>
             ) : step === "error" ? (
               <div className="flex max-w-52 flex-col items-center gap-3 text-center">
                 <TriangleAlert className="h-6 w-6 text-destructive" />
