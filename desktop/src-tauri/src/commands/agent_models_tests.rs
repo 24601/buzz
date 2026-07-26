@@ -194,37 +194,33 @@ fn saved_agent_model_discovery_uses_record_snapshot_for_definition_less_agent() 
     )
     .expect("sample managed agent record");
 
-    // resolve_effective_harness_descriptor is the single resolver used by
-    // get_agent_models — verify it layers env correctly and strips reserved keys.
-    let descriptor = crate::managed_agents::resolve_effective_harness_descriptor(
-        &record,
-        &[],
-        &Default::default(),
-    )
-    .expect("descriptor should resolve for a valid record");
+    // agent_model_discovery_config is the single helper get_agent_models
+    // consumes — verify it layers env correctly, strips reserved keys, and
+    // keeps the record's own model/provider for a definition-less instance
+    // (matching spawn's `resolve_definition_less` arm).
+    let discovery = agent_model_discovery_config(&record, &[], &Default::default())
+        .expect("discovery config should resolve for a valid record");
 
-    assert_eq!(descriptor.command.as_str(), "goose");
+    assert_eq!(discovery.command.as_str(), "goose");
+    assert_eq!(discovery.model.as_deref(), Some("record-model"));
+    assert_eq!(discovery.provider.as_deref(), Some("databricks"));
     assert_eq!(
-        descriptor.env.get("GOOSE_MODEL").map(String::as_str),
+        discovery.env.get("GOOSE_MODEL").map(String::as_str),
         Some("record-model")
     );
     assert_eq!(
-        descriptor.env.get("GOOSE_PROVIDER").map(String::as_str),
+        discovery.env.get("GOOSE_PROVIDER").map(String::as_str),
         Some("databricks")
     );
     assert_eq!(
-        descriptor.env.get("OPENAI_API_KEY").map(String::as_str),
+        discovery.env.get("OPENAI_API_KEY").map(String::as_str),
         Some("record-key")
     );
     // Reserved keys are stripped from the descriptor env.
-    assert!(!descriptor.env.contains_key("BUZZ_PRIVATE_KEY"));
-    // get_agent_models recovers the provider env var from the runtime metadata
-    // for the descriptor's command (the inline equivalent of the old
-    // SavedAgentModelDiscoveryConfig.provider_env_var).
-    assert_eq!(
-        known_acp_runtime(&descriptor.command).and_then(|meta| meta.provider_env_var),
-        Some("GOOSE_PROVIDER")
-    );
+    assert!(!discovery.env.contains_key("BUZZ_PRIVATE_KEY"));
+    // The provider env var is recovered from the runtime metadata for the
+    // effective command (the old SavedAgentModelDiscoveryConfig.provider_env_var).
+    assert_eq!(discovery.provider_env_var, Some("GOOSE_PROVIDER"));
 }
 
 // ---------------------------------------------------------------------------
@@ -408,27 +404,25 @@ fn model_discovery_ignores_stale_record_for_linked_agent() {
         updated_at: "".to_string(),
     };
 
-    // get_agent_models resolves model/provider through the authoritative
-    // resolver (the same one spawn uses) — the stale record bytes must lose.
+    // agent_model_discovery_config is the single helper get_agent_models
+    // consumes — the stale record bytes must lose to the persona's current
+    // model/provider (the same authoritative resolver spawn uses).
     let personas = [persona];
     let global = crate::managed_agents::GlobalAgentConfig::default();
-    let (model, provider) =
-        crate::managed_agents::resolve_effective_model_provider(&record, &personas, &global);
-    assert_eq!(model.as_deref(), Some("persona-model"));
-    assert_eq!(provider.as_deref(), Some("anthropic"));
+    let discovery = agent_model_discovery_config(&record, &personas, &global)
+        .expect("discovery config should resolve for a linked record");
+    assert_eq!(discovery.model.as_deref(), Some("persona-model"));
+    assert_eq!(discovery.provider.as_deref(), Some("anthropic"));
 
     // And the discovery env comes from the descriptor, whose layering also
     // resolves through the definition — the derived model env var must carry
     // the persona's model, not the stale record snapshot.
-    let descriptor =
-        crate::managed_agents::resolve_effective_harness_descriptor(&record, &personas, &global)
-            .expect("descriptor should resolve for a linked record");
     assert_eq!(
-        descriptor.env.get("GOOSE_MODEL").map(String::as_str),
+        discovery.env.get("GOOSE_MODEL").map(String::as_str),
         Some("persona-model")
     );
     assert_eq!(
-        descriptor.env.get("GOOSE_PROVIDER").map(String::as_str),
+        discovery.env.get("GOOSE_PROVIDER").map(String::as_str),
         Some("anthropic")
     );
 }

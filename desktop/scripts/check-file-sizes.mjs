@@ -536,7 +536,11 @@ const overrides = new Map([
   // descriptor path also deletes saved_agent_model_discovery_config, whose
   // callers now use resolve_effective_model_provider + the descriptor env
   // directly (net wash after the merge of the deltas above).
-  ["src-tauri/src/commands/agent_models.rs", 1114],
+  // +38 (1114 -> 1152): agent_model_discovery_config extracted as a pure,
+  // test-bindable seam (struct + helper + docs) so the linked-agent
+  // regression test kills the stale-record mutation at get_agent_models'
+  // consumption point (review finding, Wren + Dawn).
+  ["src-tauri/src/commands/agent_models.rs", 1152],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.
