@@ -11,6 +11,7 @@ fn pending_client_runtime(
         model_id: None,
         max_vram_gb: None,
         join_token: Some("initial-token".to_string()),
+        mesh_name: None,
         trusted_owner_ids: None,
     };
     super::DesktopMeshRuntime {
