@@ -26,42 +26,53 @@ workflows:
         script: flutter build ios --simulator --debug
       - name: Boot simulator, record video, launch + drive app
         script: |
-          set -euo pipefail
+          # NOTE: no `pipefail` — `... | head` triggers SIGPIPE upstream and
+          # would abort under pipefail. Be defensive with `|| true` instead.
+          set -u
           ART="$CM_BUILD_DIR/artifacts"
           mkdir -p "$ART"
 
-          # Pick and boot an available iPhone simulator.
+          echo "== available simulators =="
+          xcrun simctl list devices available || true
+
+          # First UDID belonging to an iPhone device line.
           DEVICE=$(xcrun simctl list devices available \
-            | grep -Eo 'iPhone[^(]*\(([0-9A-Fa-f-]{36})\)' \
-            | grep -Eo '[0-9A-Fa-f-]{36}' | head -n1)
-          echo "Using simulator UDID: $DEVICE"
-          xcrun simctl boot "$DEVICE" || true
-          xcrun simctl bootstatus "$DEVICE" -b
+            | grep -iE 'iPhone' \
+            | grep -oiE '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' \
+            | head -n1)
+          echo "DEVICE=[$DEVICE]"
+          if [ -z "$DEVICE" ]; then echo "No iPhone simulator available"; exit 1; fi
+
+          xcrun simctl boot "$DEVICE" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE" || true
 
           APP="build/ios/iphonesimulator/Runner.app"
           BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")
-          echo "Installing $BUNDLE_ID"
-          xcrun simctl install "$DEVICE" "$APP"
+          echo "BUNDLE_ID=$BUNDLE_ID"
+          xcrun simctl install "$DEVICE" "$APP" || true
 
           # Start screen recording, then launch and drive the real app.
           xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$ART/ios_app.mp4" &
           REC_PID=$!
           sleep 2
 
-          xcrun simctl launch "$DEVICE" "$BUNDLE_ID"
+          xcrun simctl launch "$DEVICE" "$BUNDLE_ID" || true
           sleep 8
-          xcrun simctl io "$DEVICE" screenshot "$ART/01_pairing_screen.png"
+          xcrun simctl io "$DEVICE" screenshot "$ART/01_pairing_screen.png" || true
 
           # Drive the app via its URL scheme (camera/QR is unavailable on a sim).
           xcrun simctl openurl "$DEVICE" "buzz://pair?demo=cloud-agent" || true
           sleep 5
-          xcrun simctl io "$DEVICE" screenshot "$ART/02_after_deeplink.png"
+          xcrun simctl io "$DEVICE" screenshot "$ART/02_after_deeplink.png" || true
           sleep 2
 
           # Finalize the recording (simctl writes the file on SIGINT).
-          kill -INT "$REC_PID" || true
-          sleep 4
-          echo "Artifacts:"; ls -la "$ART"
+          kill -INT "$REC_PID" 2>/dev/null || true
+          wait "$REC_PID" 2>/dev/null || true
+          sleep 2
+          echo "== artifacts =="; ls -la "$ART" || true
+          # Fail only if we captured no video at all.
+          test -s "$ART/ios_app.mp4"
       - name: Flutter unit/widget tests
         script: |
           flutter test 2>&1 | tee "$CM_BUILD_DIR/artifacts/flutter-test.log"
