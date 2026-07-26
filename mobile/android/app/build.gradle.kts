@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -25,7 +27,7 @@ val hasUploadSigning = missingUploadSigningValues.isEmpty()
 // multiple worktrees install side by side. Release builds never read this.
 val worktreePropsFile = rootProject.file("worktree.properties")
 val worktreeProps =
-    java.util.Properties().apply {
+    Properties().apply {
         if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
     }
 val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
