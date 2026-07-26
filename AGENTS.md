@@ -659,5 +659,47 @@ CH=$(./target/debug/buzz channels create --name demo --type stream \
   Docker.
 - Desktop renders headlessly via the mock bridge: `just desktop-typecheck`,
   `just desktop-build`, and `just desktop-screenshot --name home` all work
-  (Chromium is pre-installed). `just dev` (native Tauri shell) needs a display
-  and is not usable here.
+  (Chromium is pre-installed).
+
+### Native Tauri shell (headless, real WebKitGTK window)
+
+The full native desktop app **does** run here — there is a VNC-backed X server
+at `DISPLAY=:1` (1920x1200, XFCE + `xfwm4`) that RecordScreen/computerUse also
+use. Snapshot already has the Linux GUI build deps (`libwebkit2gtk-4.1-dev`,
+`libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+`libsoup-3.0-dev`, `libasound2-dev`/`libpulse-dev` for huddle audio) plus
+`Xvfb`/`ffmpeg`/ImageMagick.
+
+`just dev` is unusable (it re-runs the Docker `_ensure-services` gate and
+refuses to start when a relay is already on :3000). Use `just desktop-standalone`
+instead — it builds the sidecars + `src-tauri` and runs `tauri dev` with no
+relay/Docker, and the app auto-fills `ws://localhost:3000` during onboarding so
+it connects to the locally-running relay:
+
+```bash
+export DISPLAY=:1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 \
+  LIBGL_ALWAYS_SOFTWARE=1        # WebKitGTK needs software GL under VNC
+just desktop-standalone
+```
+
+First launch downloads STT/TTS models (Parakeet/Pocket-TTS) into `~/.buzz` —
+allow a minute. Complete onboarding via computerUse (Create identity → skip
+agent-harness step → Join community `ws://localhost:3000` → set a display
+name), then use channels normally. Capture receipts with RecordScreen (video)
+or `DISPLAY=:1 import -window root out.png` (screenshot).
+
+**`libstdc++.so` linker note:** Rust 1.95 links with bundled `rust-lld`, which
+needs the `libstdc++.so` dev symlink in a standard multiarch path. The snapshot
+has `/usr/lib/x86_64-linux-gnu/libstdc++.so -> libstdc++.so.6`; if a
+`cannot find -lstdc++` link error ever recurs on a fresh VM, recreate it with
+`sudo ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/libstdc++.so`.
+
+### Mobile (Flutter) — what runs here
+
+Agent-safe checks work fully headless: `just mobile-check` / `flutter analyze`
+(clean) and `flutter test` (~666 tests pass). Per this file's rules, agents do
+**not** run `flutter run`/`flutter build`. Running the actual mobile UI is a
+hardware limitation, not a rule one: the iOS simulator is macOS-only (impossible
+on this Linux VM), and an Android emulator needs `/dev/kvm`, which is **absent**
+here (`ls /dev/kvm` fails). So mobile verification = `analyze` + `test`.
