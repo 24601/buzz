@@ -2712,6 +2712,7 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
     page,
     {
       createManagedAgentDelayMs: 1_000,
+      globalAgentConfigDelayMs: 250,
       globalAgentConfig: {
         env_vars: { OPENAI_COMPAT_API_KEY: "e2e-placeholder" },
         provider: "openai",
