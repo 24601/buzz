@@ -18,6 +18,19 @@ workflows:
       flutter: 3.41.7
       xcode: latest
       cocoapods: default
+      vars:
+        COCOAPODS_DISABLE_STATS: "true"
+    # Persisted across builds to save minutes: pub packages, CocoaPods spec
+    # repo + installed Pods, Dart tool state, and Xcode DerivedData (incremental
+    # compile). Populated after the first successful build.
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+        - $HOME/.cocoapods
+        - $CM_BUILD_DIR/mobile/.dart_tool
+        - $CM_BUILD_DIR/mobile/ios/Pods
+        - $HOME/Library/Developer/Xcode/DerivedData
     scripts:
       - name: Toolchain versions
         script: |
@@ -103,6 +116,16 @@ workflows:
       flutter: 3.41.7
       xcode: latest
       cocoapods: default
+      vars:
+        COCOAPODS_DISABLE_STATS: "true"
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+        - $HOME/.cocoapods
+        - $CM_BUILD_DIR/mobile/.dart_tool
+        - $CM_BUILD_DIR/mobile/ios/Pods
+        - $HOME/Library/Developer/Xcode/DerivedData
     scripts:
       - name: Flutter pub get
         script: cd "$CM_BUILD_DIR/mobile" && flutter pub get
