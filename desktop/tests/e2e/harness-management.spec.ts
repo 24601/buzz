@@ -171,6 +171,29 @@ test.describe("preset gallery", () => {
   });
 });
 
+// ── Preset logos in the Agent runtimes list ──────────────────────────────────
+
+test("Agent runtimes rows render bundled preset logos, not initials", async ({
+  page,
+}) => {
+  await installMockBridge(page, {
+    acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
+  });
+  await openHarnessSettings(page);
+
+  // Preset rows in "Agent runtimes" must show the same bundled logo the
+  // preset gallery uses (PRESET_LOGOS via RuntimeIcon), even though presets
+  // emit an empty avatar_url (the no-remote-icon security line).
+  for (const [id, file] of [
+    ["hermes", "/harness-logos/hermes.png"],
+    ["openclaw", "/harness-logos/openclaw.svg"],
+  ] as const) {
+    const logo = page.getByTestId(`doctor-runtime-logo-${id}`);
+    await expect(logo).toBeVisible();
+    await expect(logo.locator("img")).toHaveAttribute("src", file);
+  }
+});
+
 // ── Custom harness add ────────────────────────────────────────────────────────
 
 test.describe("add custom harness", () => {

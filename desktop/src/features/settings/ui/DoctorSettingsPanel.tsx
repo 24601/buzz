@@ -10,6 +10,10 @@ import {
   useInstallAcpRuntimeMutation,
 } from "@/features/agents/hooks";
 import { ProfileAvatar } from "@/features/profile/ui/ProfileAvatar";
+import {
+  PRESET_LOGOS,
+  RuntimeIcon,
+} from "@/features/onboarding/ui/RuntimeIcon";
 import type { AcpAuthMethod, AcpRuntimeCatalogEntry } from "@/shared/api/types";
 import { getInstallErrorMessage } from "@/shared/lib/installError";
 import { cn } from "@/shared/lib/cn";
@@ -61,6 +65,22 @@ function runtimeInstallGuideLabel(runtime: AcpRuntimeCatalogEntry) {
 }
 
 function RuntimeLogo({ runtime }: { runtime: AcpRuntimeCatalogEntry }) {
+  // Bundled preset logos: presets deliberately emit an empty avatar_url (no
+  // remote or user-supplied icon URLs), so route them through RuntimeIcon —
+  // the same component the preset gallery uses — which owns the PRESET_LOGOS
+  // map and the per-logo contrast treatments (omp needs a dark chip, grok a
+  // light one). Builtins keep the ProfileAvatar path below.
+  if (PRESET_LOGOS[runtime.id.trim().toLowerCase()]) {
+    return (
+      <span
+        className="flex h-9 w-9 shrink-0 items-center justify-center"
+        data-testid={`doctor-runtime-logo-${runtime.id}`}
+      >
+        <RuntimeIcon className="h-9 w-9" runtime={runtime} />
+      </span>
+    );
+  }
+
   const avatarUrl = RUNTIME_LOGO_URLS[runtime.id] ?? runtime.avatarUrl;
 
   return (
