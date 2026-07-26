@@ -208,11 +208,13 @@ pub fn save_global_agent_config(app: &AppHandle, config: &GlobalAgentConfig) -> 
 ///
 /// A runtime-less definition can be started on a fallback runtime when its
 /// saved global preference is hidden or unavailable. In that case the selected
-/// command is pinned on the record, and provider/model defaults belonging to a
-/// different preferred runtime must not cross the harness boundary. Explicitly
-/// configured definitions and standalone agents keep normal global inheritance.
-/// Configs written before `preferred_runtime` existed implicitly belong to
-/// Buzz Agent.
+/// command is stored as the record snapshot, and provider/model defaults
+/// belonging to a different preferred runtime must not cross the harness
+/// boundary. A non-empty `agent_command_override` is durable evidence of an
+/// explicit harness selection, so it keeps normal global inheritance even when
+/// that harness differs from the global preference. Explicitly configured
+/// definitions and standalone agents keep normal global inheritance. Configs
+/// written before `preferred_runtime` existed implicitly belong to Buzz Agent.
 pub(crate) fn global_model_provider_for_record<'a>(
     record: &ManagedAgentRecord,
     personas: &[AgentDefinition],
@@ -234,13 +236,20 @@ pub(crate) fn global_model_provider_for_record<'a>(
         return global_values;
     }
 
+    if record
+        .agent_command_override
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty())
+    {
+        return global_values;
+    }
+
     let preferred_runtime = global
         .preferred_runtime
         .as_deref()
         .and_then(crate::managed_agents::known_acp_runtime)
         .or_else(|| crate::managed_agents::known_acp_runtime("buzz-agent"));
-    let selected_command = crate::managed_agents::record_agent_command(record, personas);
-    let selected_runtime = crate::managed_agents::known_acp_runtime(&selected_command);
+    let selected_runtime = crate::managed_agents::known_acp_runtime(&record.agent_command);
 
     if selected_runtime.is_some_and(|selected| {
         preferred_runtime.is_some_and(|preferred| preferred.id == selected.id)

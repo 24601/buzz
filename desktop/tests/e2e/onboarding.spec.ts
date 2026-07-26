@@ -2681,7 +2681,7 @@ test("first-run onboarding posts the live Fizz kickoff", async ({ page }) => {
     page,
     {
       globalAgentConfig: {
-        env_vars: { OPENAI_API_KEY: "e2e-placeholder" },
+        env_vars: { OPENAI_COMPAT_API_KEY: "e2e-placeholder" },
         provider: "openai",
         model: "gpt-5.5",
       },
@@ -2710,7 +2710,14 @@ test("first-run onboarding lands before Welcome team bootstrap completes", async
   await seedActiveIdentity(page, BLANK_TYLER_IDENTITY);
   await installMockBridge(
     page,
-    { createManagedAgentDelayMs: 1_000 },
+    {
+      createManagedAgentDelayMs: 1_000,
+      globalAgentConfig: {
+        env_vars: { OPENAI_COMPAT_API_KEY: "e2e-placeholder" },
+        provider: "openai",
+        model: "gpt-5.5",
+      },
+    },
     { skipOnboardingSeed: true },
   );
   await page.goto("/");

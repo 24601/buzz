@@ -10,6 +10,7 @@ import {
   useDisabledAcpRuntimeIds,
 } from "@/features/agents/lib/runtimeVisibilityPreference";
 import { getDefaultPersonaRuntime } from "@/features/agents/lib/resolvePersonaRuntime";
+import { clearActiveTurnsForAgentOnStop } from "@/features/agents/managedAgentRuntimeHooks";
 import { useImplicitGlobalAgentConfig } from "@/features/agents/useGlobalAgentConfig";
 import { useCommunities } from "@/features/communities/useCommunities";
 import { welcomeKickoffMarker } from "@/features/onboarding/devFreshOnboarding";
@@ -495,12 +496,14 @@ export async function restartWelcomeTeammate(
   options: {
     stopAgent?: typeof stopManagedAgent;
     startAgent?: typeof startManagedAgent;
+    onStopped?: () => void;
   } = {},
 ) {
   const stopAgent = options.stopAgent ?? stopManagedAgent;
   const startAgent = options.startAgent ?? startManagedAgent;
   if (agent.status === "running") {
     await stopAgent(agent.pubkey);
+    options.onStopped?.();
   }
   return startAgent(agent.pubkey);
 }
@@ -682,7 +685,9 @@ export function useWelcomeKickoff(
               isTeammate &&
               welcomeTeammateNeedsRestart(agent, resolvedAgentSet.lead.pubkey)
             ) {
-              return restartWelcomeTeammate(agent);
+              return restartWelcomeTeammate(agent, {
+                onStopped: () => clearActiveTurnsForAgentOnStop(agent.pubkey),
+              });
             }
             return agent.status === "running" || agent.status === "deployed"
               ? Promise.resolve(agent)

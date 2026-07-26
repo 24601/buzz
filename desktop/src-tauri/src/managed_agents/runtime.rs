@@ -29,11 +29,9 @@ pub(crate) use sweep::sweep_untracked_bundle_harnesses;
 
 type RespondToEnv = (Vec<(&'static str, String)>, Vec<&'static str>);
 
-/// Binary name fragments for all known agent/harness processes that Buzz
-/// may spawn. Used by `process_belongs_to_us()` and the orphan sweep to
-/// identify processes we should clean up. Both hyphenated and underscored
-/// variants are listed because macOS `proc_name()` and Linux `/proc/comm`
-/// may report either form depending on how the binary was built.
+/// Binary name fragments for all known agent/harness processes that Buzz may spawn.
+/// Used by `process_belongs_to_us()` and the orphan sweep to identify processes we
+/// should clean up. Both name variants cover platform-dependent reporting.
 pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
     "buzz-acp",
     "buzz_acp",
@@ -54,13 +52,11 @@ pub(crate) const KNOWN_AGENT_BINARIES: &[&str] = &[
 ];
 
 /// Script interpreters that may host managed agent wrappers (e.g. npm shims).
-/// A process whose name matches here is NOT immediately claimed — it must also
-/// carry `BUZZ_MANAGED_AGENT` in its environment (checked by the caller via
-/// `process_has_buzz_marker()`). This avoids sweeping unrelated node processes.
+/// Callers must also find `BUZZ_MANAGED_AGENT` in the process environment,
+/// avoiding unrelated node processes.
 pub(crate) const KNOWN_SCRIPT_INTERPRETERS: &[&str] = &["node"];
 
-/// Check if a process name matches any of our known agent binaries.
-/// Uses exact match or prefix-with-separator to avoid false positives
+/// Match exact agent names or prefixes with separators to avoid false positives
 /// (e.g. `"goose"` must not match `"mongoose"`).
 fn name_matches_known_binary(name: &str) -> bool {
     KNOWN_AGENT_BINARIES.iter().any(|&binary| {
@@ -855,7 +851,14 @@ pub(crate) fn collect_same_instance_orphans(
 
 /// Binary names for the Buzz desktop/Tauri process. Used by dead-instance
 /// detection to confirm the owning desktop is still alive.
-const DESKTOP_BINARY_NAMES: &[&str] = &["Buzz", "buzz-desktop", "buzz_desktop"];
+const DESKTOP_BINARY_NAMES: &[&str] = &[
+    "Buzz",
+    "buzz-desktop",
+    "buzz_desktop",
+    // Linux limits /proc/<pid>/comm to 15 visible bytes, truncating the
+    // AppImage shim's real executable name, `buzz-desktop.bin`.
+    "buzz-desktop.bi",
+];
 
 /// Check if a process name matches a known Buzz desktop binary.
 fn is_desktop_binary(name: &str) -> bool {

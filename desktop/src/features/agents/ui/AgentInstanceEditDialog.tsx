@@ -1,7 +1,6 @@
 import * as React from "react";
 import { ChevronDown } from "lucide-react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-
 import { toast } from "sonner";
 
 import {
@@ -86,6 +85,7 @@ import { resolveModelFieldStatusMessage } from "./agentConfigControls";
 import { AdvancedRequiredBadge } from "./AdvancedRequiredBadge";
 import { ADVANCED_FIELDS_MOTION_TRANSITION } from "./agentAdvancedFieldsMotion";
 import type { AgentInstanceEditDialogProps } from "./AgentInstanceEditDialog.types";
+import { showAgentProfileSyncWarning } from "./agentProfileSyncWarning";
 
 export function AgentInstanceEditDialog({
   agent,
@@ -702,6 +702,7 @@ export function AgentInstanceEditDialog({
           autoRestartOnConfigChange,
         );
       }
+      showAgentProfileSyncWarning(result.agent.name, result.profileSyncError);
       handleOpenChange(false);
       onUpdated?.(result.agent);
       // The auto-restart policy deliberately never fires for a stopped or
