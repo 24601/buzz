@@ -25,9 +25,7 @@ workflows:
           xcodebuild -version
       - name: Flutter pub get
         script: cd "$CM_BUILD_DIR/mobile" && flutter pub get
-      - name: Build app for iOS Simulator (no codesign needed)
-        script: cd "$CM_BUILD_DIR/mobile" && flutter build ios --simulator --debug
-      - name: Boot simulator, record video, launch + drive app
+      - name: Boot simulator, launch app (flutter run), record video, drive it
         script: |
           # NOTE: no `pipefail` — `... | head` triggers SIGPIPE upstream and
           # would abort under pipefail. Be defensive with `|| true` instead.
@@ -50,32 +48,39 @@ workflows:
           xcrun simctl boot "$DEVICE" 2>/dev/null || true
           xcrun simctl bootstatus "$DEVICE" || true
 
-          APP="build/ios/iphonesimulator/Runner.app"
-          BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$APP/Info.plist")
-          echo "BUNDLE_ID=$BUNDLE_ID"
-          xcrun simctl install "$DEVICE" "$APP" || true
+          # Launch the (debug) app the reliable way: `flutter run` wires up the
+          # Dart VM service so the app actually renders. `simctl launch` alone
+          # leaves a debug build on the springboard. Run it in the background and
+          # wait until the VM service is up.
+          flutter run -d "$DEVICE" --debug > "$ART/flutter-run.log" 2>&1 &
+          RUN_PID=$!
+          echo "flutter run pid=$RUN_PID; waiting for app to come up..."
+          for i in $(seq 1 120); do
+            if grep -qE "Dart VM Service|Flutter run key commands|Syncing files to device" "$ART/flutter-run.log"; then
+              echo "app is up (marker after ${i}x2s)"; break
+            fi
+            if ! kill -0 "$RUN_PID" 2>/dev/null; then echo "flutter run exited early"; break; fi
+            sleep 2
+          done
+          sleep 8
 
-          # Start screen recording, then launch and drive the real app.
+          # Record the running app, then drive it via its URL scheme.
           xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$ART/ios_app.mp4" &
           REC_PID=$!
           sleep 2
-
-          xcrun simctl launch "$DEVICE" "$BUNDLE_ID" || true
-          sleep 8
           xcrun simctl io "$DEVICE" screenshot "$ART/01_pairing_screen.png" || true
-
-          # Drive the app via its URL scheme (camera/QR is unavailable on a sim).
           xcrun simctl openurl "$DEVICE" "buzz://pair?demo=cloud-agent" || true
-          sleep 5
+          sleep 6
           xcrun simctl io "$DEVICE" screenshot "$ART/02_after_deeplink.png" || true
           sleep 2
 
-          # Finalize the recording (simctl writes the file on SIGINT).
+          # Finalize recording, then stop flutter run.
           kill -INT "$REC_PID" 2>/dev/null || true
           wait "$REC_PID" 2>/dev/null || true
-          sleep 2
+          kill "$RUN_PID" 2>/dev/null || true
+
+          echo "== flutter run log (tail) =="; tail -n 40 "$ART/flutter-run.log" || true
           echo "== artifacts =="; ls -la "$ART" || true
-          # Fail only if we captured no video at all.
           test -s "$ART/ios_app.mp4"
       - name: Flutter unit/widget tests
         script: |
