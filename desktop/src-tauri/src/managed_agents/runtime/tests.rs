@@ -710,15 +710,20 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     // getpgid returned -1). The group is killed in cleanup, so the sleep
     // never runs to term.
     //
-    // `/bin/sh` (absolute) rather than `sh`: parallel tests holding
-    // `lock_path_mutex` legitimately swap PATH to a tempdir, and this test
-    // doesn't need the lock — but a PATH lookup during the swap window
-    // fails with NotFound (observed flake).
+    // Absolute `/bin/sh` and `/bin/sleep` rather than bare names: parallel
+    // tests holding `lock_path_mutex` legitimately swap PATH to a tempdir,
+    // and this test doesn't need the lock — but a PATH lookup during the
+    // swap window fails with NotFound, and a child spawned during it
+    // inherits the poisoned PATH for its lifetime, so the script's inner
+    // lookups must be absolute too (observed flake).
     let mut harness = {
         let mut cmd = Command::new("/bin/sh");
-        cmd.args(["-c", "/bin/sh -c 'sleep 10 & echo $!' & wait $!; sleep 10"])
-            .stdout(std::process::Stdio::piped())
-            .process_group(0);
+        cmd.args([
+            "-c",
+            "/bin/sh -c '/bin/sleep 10 & echo $!' & wait $!; /bin/sleep 10",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .process_group(0);
         cmd.spawn().expect("spawn harness")
     };
 
@@ -802,9 +807,15 @@ fn own_group_grandchild_detected_by_ancestor_walk() {
     // The test process is the "harness". Spawn an intermediate with its own
     // process group (mirrors the node shim). It backgrounds a grandchild
     // (sleep 30) and prints the grandchild PID so we can inspect it.
+    //
+    // Absolute `/bin/sh` and `/bin/sleep` — no PATH lookups anywhere in this
+    // tree. Parallel tests holding `lock_path_mutex` legitimately swap PATH to
+    // a tempdir; the outer spawn during that window fails with NotFound, and a
+    // child spawned during it inherits the poisoned PATH for its lifetime, so
+    // inner lookups must be absolute too (observed flake).
     let mut intermediate = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sleep 30 & echo $!; wait"])
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "/bin/sleep 30 & echo $!; wait"])
             .stdout(std::process::Stdio::piped())
             .process_group(0);
         cmd.spawn().expect("spawn intermediate")
@@ -1232,7 +1243,16 @@ fn make_pair_runtime_placeholder() -> crate::managed_agents::ManagedAgentPairRun
     use std::process::{Command, Stdio};
     // Spawn a real child so ManagedAgentProcess's Child field is satisfied.
     // `true` exits immediately with 0 — just a handle we need for type purposes.
-    let child = Command::new("true")
+    //
+    // Absolute `/usr/bin/true` on unix (present on both macOS and Linux):
+    // parallel tests holding `lock_path_mutex` swap PATH to a tempdir, and a
+    // bare `true` lookup during that window fails with NotFound (observed
+    // flake). Windows keeps the PATH lookup — no test there swaps PATH.
+    #[cfg(unix)]
+    let program = "/usr/bin/true";
+    #[cfg(windows)]
+    let program = "true";
+    let child = Command::new(program)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
