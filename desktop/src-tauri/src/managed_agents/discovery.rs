@@ -344,7 +344,10 @@ pub fn effective_agent_command(
 }
 
 mod overrides;
-pub use overrides::{apply_agent_command_update, create_time_agent_command_override};
+pub use overrides::{
+    apply_agent_command_update, create_time_agent_command_override,
+    create_time_agent_command_override_state,
+};
 
 fn default_agent_args(command: &str) -> Option<Vec<String>> {
     match normalize_command_identity(command).as_str() {

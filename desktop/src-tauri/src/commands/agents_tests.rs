@@ -19,6 +19,7 @@ fn bare_agent_record(
         acp_command: "buzz-acp".to_string(),
         agent_command: "buzz-agent".to_string(),
         agent_command_override: None,
+        agent_command_override_is_implicit: false,
         agent_args: vec![],
         mcp_command: "".to_string(),
         turn_timeout_seconds: 300,
@@ -206,6 +207,26 @@ fn deploy_resolver_keeps_defaults_for_an_explicit_harness_override() {
     assert_eq!(
         resolve_deploy_model_provider(&record, &personas, &global),
         (Some("auto"), Some("relay-mesh"))
+    );
+}
+
+#[test]
+fn deploy_resolver_masks_mismatched_defaults_for_an_implicit_fallback_override() {
+    let mut record = bare_agent_record(Some("p1"), None, None);
+    record.agent_command = "goose".to_string();
+    record.agent_command_override = Some("goose".to_string());
+    record.agent_command_override_is_implicit = true;
+    let personas = vec![persona_record("p1", None, None)];
+    let global = crate::managed_agents::GlobalAgentConfig {
+        model: Some("auto".to_string()),
+        provider: Some("relay-mesh".to_string()),
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_deploy_model_provider(&record, &personas, &global),
+        (None, None)
     );
 }
 

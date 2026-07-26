@@ -66,6 +66,8 @@ export type CreateChannelManagedAgentInput = {
    * unpinned so the persona remains authoritative.
    */
   harnessOverride?: boolean;
+  /** The pin preserves an automatic runtime-less fallback, not an explicit pick. */
+  implicitHarnessFallback?: boolean;
   /** Preferred model ID from the persona. Passed to createManagedAgent. */
   model?: string;
   role?: Exclude<ChannelRole, "owner">;
@@ -353,6 +355,7 @@ export async function provisionChannelManagedAgent(
     acpCommand: "buzz-acp",
     agentCommand: input.runtime.command,
     harnessOverride: input.harnessOverride ?? false,
+    implicitHarnessFallback: input.implicitHarnessFallback ?? false,
     agentArgs: input.runtime.defaultArgs,
     mcpCommand: input.runtime.mcpCommand ?? "",
     personaId: input.personaId ?? undefined,

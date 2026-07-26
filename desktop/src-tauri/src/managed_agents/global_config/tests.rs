@@ -309,6 +309,7 @@ fn bare_record() -> ManagedAgentRecord {
         acp_command: "buzz-acp".to_string(),
         agent_command: "buzz-agent".to_string(),
         agent_command_override: None,
+        agent_command_override_is_implicit: false,
         agent_args: vec![],
         mcp_command: "".to_string(),
         turn_timeout_seconds: 300,
@@ -485,6 +486,27 @@ fn explicit_harness_override_keeps_defaults_from_a_different_preferred_runtime()
     assert_eq!(
         resolve_effective_model_provider(&record, &personas, &global),
         (Some("auto"), Some("relay-mesh"))
+    );
+}
+
+#[test]
+fn implicit_fallback_override_masks_defaults_from_a_different_preferred_runtime() {
+    let mut record = bare_record();
+    record.persona_id = Some("p1".to_string());
+    record.agent_command = "goose".to_string();
+    record.agent_command_override = Some("goose".to_string());
+    record.agent_command_override_is_implicit = true;
+    let personas = vec![persona("p1", None, None)];
+    let global = GlobalAgentConfig {
+        model: Some("auto".to_string()),
+        provider: Some("relay-mesh".to_string()),
+        preferred_runtime: Some("buzz-agent".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        resolve_effective_model_provider(&record, &personas, &global),
+        (None, None)
     );
 }
 
