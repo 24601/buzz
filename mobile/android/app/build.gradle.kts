@@ -22,7 +22,7 @@ val missingUploadSigningValues = uploadSigningValues.filterValues { it.isNullOrB
 val hasUploadSigning = missingUploadSigningValues.isEmpty()
 
 // Worktree-aware debug identity (gitignored, written by
-// scripts/mobile-worktree-env.sh): debug builds from a git worktree get a
+// scripts/mobile-worktree-overrides.sh): debug builds from a git worktree get a
 // branch-labelled app name and a unique applicationId suffix so builds from
 // multiple worktrees install side by side. Release builds never read this.
 val worktreePropsFile = rootProject.file("worktree.properties")
@@ -31,6 +31,12 @@ val worktreeProps =
         if (worktreePropsFile.isFile) worktreePropsFile.inputStream().use { load(it) }
     }
 val worktreeLabel = worktreeProps.getProperty("label")?.takeIf { it.isNotBlank() }
+if (worktreeLabel != null && !worktreeLabel.matches(Regex("""[A-Za-z0-9._-]+"""))) {
+    throw GradleException(
+        "worktree.properties label must match [A-Za-z0-9._-]+ (safe for string " +
+            "resources), got: " + worktreeLabel,
+    )
+}
 val worktreeIdSuffix =
     worktreeProps.getProperty("applicationIdSuffix")?.takeIf { it.isNotBlank() }
 if (worktreeIdSuffix != null && !worktreeIdSuffix.matches(Regex("""\.[a-z][a-z0-9_]*"""))) {

@@ -554,10 +554,12 @@ just mobile-dev
 ```
 
 When run from a git worktree, `just mobile-dev` (and `just
-mobile-build-android`) give the debug build a branch-labelled app name and a
-per-worktree app identifier via `scripts/mobile-worktree-env.sh`, so builds
-from multiple worktrees install side by side. Release builds are unaffected.
-See [mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
+mobile-build-android`) give the debug build a per-worktree app identifier
+(keyed to the worktree directory name) and a branch-labelled app name via
+`scripts/mobile-worktree-overrides.sh`, so builds from multiple worktrees
+install side by side. Release builds are unaffected. `just mobile-clean`
+removes stale worktree-suffixed installs from simulators/emulators. See
+[mobile/README.md](mobile/README.md) for direct Xcode / Android Studio
 usage.
 
 ### Testing Conventions
