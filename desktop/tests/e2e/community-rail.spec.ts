@@ -182,6 +182,7 @@ test.describe("community rail", () => {
     await installMockBridge(
       page,
       {
+        relayMembershipEoseDelayMs: 30_000,
         relayRequiresMembership: true,
         relayRole: "admin",
       },
@@ -215,7 +216,7 @@ test.describe("community rail", () => {
     ).not.toBeFocused();
     await expect(
       menu.getByRole("menuitem", { name: "Invite to community" }),
-    ).toBeVisible();
+    ).toBeVisible({ timeout: 1_000 });
     await expect(
       menu.getByRole("menuitem", { name: "Community settings" }),
     ).toBeVisible();

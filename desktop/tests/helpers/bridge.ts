@@ -301,6 +301,8 @@ type MockBridgeOptions = {
   oaOwnerIsMe?: boolean;
   /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
   relayRequiresMembership?: boolean;
+  /** Delay EOSE for membership snapshots after delivering the event. */
+  relayMembershipEoseDelayMs?: number;
   /**
    * Active identity's role in the seeded `mockRelayMembers`. `null` removes
    * the active identity from the membership list entirely (admin-path branch

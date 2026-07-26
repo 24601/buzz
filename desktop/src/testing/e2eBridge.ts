@@ -284,6 +284,8 @@ type E2eConfig = {
     oaOwnerIsMe?: boolean;
     /** Whether the mock relay advertises NIP-43 membership support. Defaults to false. */
     relayRequiresMembership?: boolean;
+    /** Delay EOSE for membership snapshots after delivering the event. */
+    relayMembershipEoseDelayMs?: number;
     relayRole?: "owner" | "admin" | "member" | null;
     // Descriptors returned by the mocked `pick_and_upload_media` /
     // `upload_media_bytes` commands. Lets a spec drive the attachment flow
@@ -8748,7 +8750,15 @@ function sendToMockSocket(args: {
         subId,
         createMockRelayMembershipEvent(),
       ]);
-      sendWsText(socket.handler, ["EOSE", subId]);
+      const eoseDelayMs = getConfig()?.mock?.relayMembershipEoseDelayMs ?? 0;
+      if (eoseDelayMs > 0) {
+        window.setTimeout(
+          () => sendWsText(socket.handler, ["EOSE", subId]),
+          eoseDelayMs,
+        );
+      } else {
+        sendWsText(socket.handler, ["EOSE", subId]);
+      }
       return;
     }
 
