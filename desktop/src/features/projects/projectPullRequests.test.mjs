@@ -14,6 +14,9 @@ const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
 const ATTACKER = "c".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:demo`;
+const SOURCE_MESSAGE = "d".repeat(64);
+const SOURCE_CHANNEL = "11111111-1111-4111-8111-111111111111";
+const SOURCE_LINK = `buzz://message?channel=${SOURCE_CHANNEL}&id=${SOURCE_MESSAGE}`;
 
 function pullRequestEvent(overrides = {}) {
   return {
@@ -47,6 +50,23 @@ test("preserves an optional source channel from the pull request", () => {
 
   assert.equal(eventToProjectPullRequest(event).channelId, "source-channel-id");
   assert.equal(eventToProjectPullRequest(pullRequestEvent()).channelId, null);
+});
+
+test("preserves only valid source message backlinks", () => {
+  const linked = pullRequestEvent();
+  linked.tags.push(["buzz-source", SOURCE_LINK]);
+  assert.equal(
+    eventToProjectPullRequest(linked).sourceMessageLink,
+    SOURCE_LINK,
+  );
+
+  const malformed = pullRequestEvent();
+  malformed.tags.push(["buzz-source", "buzz://message?channel=source&id=bad"]);
+  assert.equal(eventToProjectPullRequest(malformed).sourceMessageLink, null);
+  assert.equal(
+    eventToProjectPullRequest(pullRequestEvent()).sourceMessageLink,
+    null,
+  );
 });
 
 function updateEvent({ pubkey, createdAt, commit, cloneUrl }) {

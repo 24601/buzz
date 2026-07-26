@@ -24,6 +24,7 @@ import {
 } from "./ProjectFeedRow";
 import { OverviewRailSection } from "./ProjectOverviewPanel";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
+import { ProjectSourceConversationLink } from "./ProjectSourceConversationLink";
 
 export function issueStatusClassName(status: ProjectIssue["status"]) {
   if (status === "Done") return "text-purple-400";
@@ -212,6 +213,11 @@ function IssueDetail({
                 #{issue.id.slice(0, 8)}
               </span>
             </h3>
+            {issue.sourceMessageLink ? (
+              <div className="mt-1.5 flex text-xs">
+                <ProjectSourceConversationLink href={issue.sourceMessageLink} />
+              </div>
+            ) : null}
           </div>
           {issue.content ? (
             <Markdown

@@ -22,6 +22,8 @@ export type ProjectIssue = {
   author: string;
   createdAt: number;
   repoAddress: string | null;
+  /** Author-claimed originating Buzz message (`buzz-source` tag). */
+  sourceMessageLink: string | null;
   labels: string[];
   recipients: string[];
   status: ProjectIssueStatus;

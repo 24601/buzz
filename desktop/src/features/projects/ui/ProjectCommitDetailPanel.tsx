@@ -12,6 +12,7 @@ import type { ProjectRepoCommit, ProjectRepoDiff } from "@/shared/api/types";
 import { CopyCommitHashButton } from "./ProjectCommitCopyButton";
 import { ProfileIdentityButton } from "./ProjectProfileIdentity";
 import { ProjectDiffFilesPanel } from "./ProjectPullRequestFilesChangedPanel";
+import { ProjectSourceConversationLink } from "./ProjectSourceConversationLink";
 
 function commitDateLabel(timestamp: number) {
   return new Date(timestamp * 1_000).toLocaleString(undefined, {
@@ -33,6 +34,7 @@ export function ProjectCommitDetailPanel({
   diffError,
   diffLoading,
   profiles,
+  sourceMessageLink,
   viewerGitIdentity,
 }: {
   commit: ProjectRepoCommit | null;
@@ -43,6 +45,7 @@ export function ProjectCommitDetailPanel({
   diffError: unknown;
   diffLoading: boolean;
   profiles?: UserProfileLookup;
+  sourceMessageLink?: string | null;
   viewerGitIdentity?: ViewerGitIdentity | null;
 }) {
   const matchedProfile = commit
@@ -96,6 +99,9 @@ export function ProjectCommitDetailPanel({
                 </>
               ) : null}
             </div>
+            {sourceMessageLink ? (
+              <ProjectSourceConversationLink href={sourceMessageLink} />
+            ) : null}
           </div>
         </div>
       </header>

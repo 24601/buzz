@@ -49,6 +49,7 @@ import {
   ProfileAuthorName,
   ProfileIdentityButton,
 } from "./ProjectProfileIdentity";
+import { ProjectSourceConversationLink } from "./ProjectSourceConversationLink";
 import { PullRequestReviewersRow } from "./PullRequestReviewersRow";
 import { PullRequestReviewCard } from "./PullRequestReviewCard";
 
@@ -362,7 +363,9 @@ export function PullRequestDetailHeader({
         <span title={formatExactTimestamp(pullRequest.createdAt)}>
           created {relativeTime(pullRequest.createdAt)}
         </span>
-        {sourceChannelId ? (
+        {pullRequest.sourceMessageLink ? (
+          <ProjectSourceConversationLink href={pullRequest.sourceMessageLink} />
+        ) : sourceChannelId ? (
           <span
             className="inline-flex min-w-0 items-center gap-1"
             title="Source channel is claimed by the pull request author and is not relay-verified."

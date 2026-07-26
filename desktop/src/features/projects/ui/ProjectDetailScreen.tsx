@@ -3,7 +3,6 @@ import {
   ChevronRight,
   ExternalLink,
   FolderGit2,
-  MessageSquare,
 } from "lucide-react";
 import * as React from "react";
 import { toast } from "sonner";
@@ -78,6 +77,7 @@ import {
 } from "./useOpenProjectTerminal";
 import type { CreateIssueDialogInput } from "./CreateIssueDialog";
 import { ProjectBranchActionDialogs } from "./ProjectBranchActionDialogs";
+import { ProjectDiscussionActions } from "./ProjectDiscussionActions";
 import {
   PROJECT_TAB_CRUMB_LABELS,
   projectPeople,
@@ -859,21 +859,11 @@ export function ProjectDetailScreen(props: ProjectDetailScreenProps) {
                   </span>
                 )}
               </nav>
-              {project.projectChannelId ? (
-                <Button
-                  className="h-8 shrink-0 gap-1.5"
-                  onClick={() => {
-                    if (project.projectChannelId) {
-                      void goChannel(project.projectChannelId);
-                    }
-                  }}
-                  size="sm"
-                  variant="outline"
-                >
-                  <MessageSquare className="h-4 w-4" />
-                  Open Discussion
-                </Button>
-              ) : null}
+              <ProjectDiscussionActions
+                channelId={project.projectChannelId}
+                onOpenChannel={(channelId) => void goChannel(channelId)}
+                sourceMessageLink={project.sourceMessageLink}
+              />
             </div>
           </div>
 

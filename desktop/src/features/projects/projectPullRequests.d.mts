@@ -75,6 +75,8 @@ export type ProjectPullRequest = {
   repoAddress: string | null;
   /** Channel where the pull request originated (`h` tag), when provided. */
   channelId: string | null;
+  /** Author-claimed originating Buzz message (`buzz-source` tag). */
+  sourceMessageLink: string | null;
   labels: string[];
   recipients: string[];
   /** Requested reviewers (root `p` tags + trusted review-request comments). */

@@ -1,3 +1,5 @@
+import { sourceMessageLinkFromEvent } from "./projectSourceMessage.mjs";
+
 export const PROJECT_ISSUE_STATUS = {
   TRIAGE: "Triage",
   BACKLOG: "Backlog",
@@ -104,6 +106,7 @@ export function eventToProjectIssue(
     author: issue.pubkey,
     createdAt: issue.created_at,
     repoAddress: getTag(issue, "a") ?? null,
+    sourceMessageLink: sourceMessageLinkFromEvent(issue),
     labels: getAllTags(issue, "t"),
     recipients: getAllTags(issue, "p"),
     status: statusFromEvent(issue, latestStatus),

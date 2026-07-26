@@ -980,6 +980,64 @@ impl GitRepoCoord {
     }
 }
 
+/// Exact Buzz conversation message that originated a git activity event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSourceMessage {
+    /// UUID of the originating Buzz channel.
+    pub channel_id: String,
+    /// 64-character hex ID of the originating message event.
+    pub event_id: String,
+}
+
+/// Build canonical conversation-context tags for a Buzz git event.
+///
+/// A channel emits an `h` tag. A source message additionally emits a
+/// `buzz-source` tag containing an exact `buzz://message` backlink. If both
+/// arguments carry a channel, they must identify the same UUID.
+pub fn build_git_conversation_tags(
+    channel_id: Option<&str>,
+    source_message: Option<&GitSourceMessage>,
+) -> Result<Vec<Tag>, SdkError> {
+    let explicit_channel = channel_id
+        .map(|value| {
+            Uuid::parse_str(value).map_err(|e| {
+                SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}"))
+            })
+        })
+        .transpose()?;
+    let source = source_message
+        .map(|source| {
+            let channel = Uuid::parse_str(&source.channel_id).map_err(|e| {
+                SdkError::InvalidInput(format!(
+                    "source message channel_id must be a valid UUID: {e}"
+                ))
+            })?;
+            let event_id = check_hex_exact(&source.event_id, 64, "source message event_id")?;
+            Ok((channel, event_id))
+        })
+        .transpose()?;
+
+    if let (Some(explicit), Some((source_channel, _))) = (explicit_channel, source.as_ref()) {
+        if explicit != *source_channel {
+            return Err(SdkError::InvalidInput(
+                "source message channel must match channel_id".into(),
+            ));
+        }
+    }
+
+    let effective_channel =
+        explicit_channel.or_else(|| source.as_ref().map(|(channel, _)| *channel));
+    let mut tags = Vec::new();
+    if let Some(channel) = effective_channel {
+        tags.push(tag(&["h", &channel.to_string()])?);
+    }
+    if let Some((channel, event_id)) = source {
+        let backlink = format!("buzz://message?channel={channel}&id={event_id}");
+        tags.push(tag(&["buzz-source", &backlink])?);
+    }
+    Ok(tags)
+}
+
 /// Metadata for a git patch event (kind:1617, NIP-34).
 #[derive(Default)]
 pub struct GitPatchMeta {
@@ -987,6 +1045,10 @@ pub struct GitPatchMeta {
     pub euc: Option<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// NIP-29 channel where the patch originated (`h` tag).
+    pub channel_id: Option<String>,
+    /// Exact Buzz message that triggered the patch (`buzz-source` tag).
+    pub source_message: Option<GitSourceMessage>,
     /// Previous patch in a series, or the original root patch when this is
     /// the first patch of a revision — emits `["e", id, "", "reply"]`.
     pub reply_to: Option<String>,
@@ -1025,6 +1087,10 @@ pub fn build_git_patch(
     let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
 
     let mut tags = vec![tag(&["a", &a_value])?];
+    tags.extend(build_git_conversation_tags(
+        meta.channel_id.as_deref(),
+        meta.source_message.as_ref(),
+    )?);
     if let Some(ref euc) = meta.euc {
         check_commit_hex(euc, "euc")?;
         tags.push(tag(&["r", euc, "euc"])?);
@@ -1075,6 +1141,10 @@ pub struct GitIssueMeta {
     pub labels: Vec<String>,
     /// Additional pubkeys to `p`-tag besides the repo owner.
     pub recipients: Vec<String>,
+    /// NIP-29 channel where the issue originated (`h` tag).
+    pub channel_id: Option<String>,
+    /// Exact Buzz message that triggered the issue (`buzz-source` tag).
+    pub source_message: Option<GitSourceMessage>,
 }
 
 /// Build a git issue event (kind:1621, NIP-34). `content` is the markdown body.
@@ -1098,6 +1168,10 @@ pub fn build_git_issue(
     let owner = check_pubkey_hex(&repo.owner, "repo owner")?;
 
     let mut tags = vec![tag(&["a", &a_value])?, tag(&["p", &owner])?];
+    tags.extend(build_git_conversation_tags(
+        meta.channel_id.as_deref(),
+        meta.source_message.as_ref(),
+    )?);
     for recipient in &meta.recipients {
         let pk = check_pubkey_hex(recipient, "recipient")?;
         tags.push(tag(&["p", &pk])?);
@@ -1308,6 +1382,8 @@ pub struct GitPullRequestMeta {
     pub recipients: Vec<String>,
     /// NIP-29 channel where the pull request originated (`h` tag).
     pub channel_id: Option<String>,
+    /// Exact Buzz message that triggered the pull request (`buzz-source` tag).
+    pub source_message: Option<GitSourceMessage>,
     /// PR subject line (`subject` tag) — required, used as the header.
     pub subject: String,
     /// Labels (`t` tags).
@@ -1367,11 +1443,10 @@ pub fn build_git_pull_request(
         tags.push(tag(&["t", label])?);
     }
     tags.push(tag(&["c", &meta.commit])?);
-    if let Some(ref channel_id) = meta.channel_id {
-        let channel_id = Uuid::parse_str(channel_id)
-            .map_err(|e| SdkError::InvalidInput(format!("channel_id must be a valid UUID: {e}")))?;
-        tags.push(tag(&["h", &channel_id.to_string()])?);
-    }
+    tags.extend(build_git_conversation_tags(
+        meta.channel_id.as_deref(),
+        meta.source_message.as_ref(),
+    )?);
     let mut clone_tag = vec!["clone"];
     clone_tag.extend(meta.clone_urls.iter().map(String::as_str));
     tags.push(tag(&clone_tag)?);
@@ -3009,6 +3084,7 @@ mod tests {
         let meta = GitIssueMeta {
             labels: vec!["bug".to_string(), "p1".to_string()],
             recipients: vec![],
+            ..Default::default()
         };
         let ev =
             sign(build_git_issue(&repo, "Crashes on startup", "steps to repro", &meta).unwrap());
@@ -3028,6 +3104,50 @@ mod tests {
         };
         let err = build_git_issue(&repo, "", "body", &GitIssueMeta::default()).unwrap_err();
         assert!(matches!(err, SdkError::InvalidInput(_)));
+    }
+
+    #[test]
+    fn git_issue_emits_exact_source_message_backlink_and_channel() {
+        let source_event = "b".repeat(64);
+        let meta = GitIssueMeta {
+            channel_id: Some("AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE".to_string()),
+            source_message: Some(GitSourceMessage {
+                channel_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee".to_string(),
+                event_id: source_event.clone(),
+            }),
+            ..Default::default()
+        };
+        let ev = sign(build_git_issue(&pr_repo(), "Source issue", "", &meta).unwrap());
+        assert!(has_tag(&ev, "h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+        assert!(has_tag(
+            &ev,
+            "buzz-source",
+            &format!(
+                "buzz://message?channel=aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee&id={source_event}"
+            )
+        ));
+    }
+
+    #[test]
+    fn git_patch_rejects_malformed_or_mismatched_source_message() {
+        let invalid_event = GitPatchMeta {
+            source_message: Some(GitSourceMessage {
+                channel_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                event_id: "not-an-event-id".to_string(),
+            }),
+            ..Default::default()
+        };
+        assert!(build_git_patch(&pr_repo(), "diff", &invalid_event).is_err());
+
+        let mismatched_channel = GitPatchMeta {
+            channel_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            source_message: Some(GitSourceMessage {
+                channel_id: "22222222-2222-4222-8222-222222222222".to_string(),
+                event_id: "c".repeat(64),
+            }),
+            ..Default::default()
+        };
+        assert!(build_git_patch(&pr_repo(), "diff", &mismatched_channel).is_err());
     }
 
     #[test]
@@ -3513,6 +3633,31 @@ mod tests {
         };
         let ev = sign(build_git_pull_request(&pr_repo(), "body", &meta).unwrap());
         assert!(has_tag(&ev, "h", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+    }
+
+    #[test]
+    fn git_pr_preserves_channel_and_emits_source_backlink() {
+        let source_event = "d".repeat(64);
+        let meta = GitPullRequestMeta {
+            subject: "s".to_string(),
+            commit: "c".repeat(40),
+            clone_urls: vec!["https://example.com/repo.git".to_string()],
+            channel_id: Some("11111111-1111-4111-8111-111111111111".to_string()),
+            source_message: Some(GitSourceMessage {
+                channel_id: "11111111-1111-4111-8111-111111111111".to_string(),
+                event_id: source_event.clone(),
+            }),
+            ..Default::default()
+        };
+        let ev = sign(build_git_pull_request(&pr_repo(), "body", &meta).unwrap());
+        assert!(has_tag(&ev, "h", "11111111-1111-4111-8111-111111111111"));
+        assert!(has_tag(
+            &ev,
+            "buzz-source",
+            &format!(
+                "buzz://message?channel=11111111-1111-4111-8111-111111111111&id={source_event}"
+            )
+        ));
     }
 
     #[test]

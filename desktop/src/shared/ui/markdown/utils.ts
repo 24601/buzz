@@ -2,6 +2,7 @@ import * as React from "react";
 import { defaultUrlTransform } from "react-markdown";
 
 import { isMessageLink } from "@/features/messages/lib/messageLink";
+import { isProjectLink } from "@/features/projects/lib/projectLink";
 
 export function useStableArray<T>(arr: T[]): T[] {
   const ref = React.useRef(arr);
@@ -166,13 +167,12 @@ export function isInsideHiddenSpoiler(element: Element): boolean {
 }
 
 /**
- * `urlTransform` for `<ReactMarkdown>` that preserves `buzz://message?…`
- * links. The default transform strips unknown schemes (returns `""`) before
- * the `a` component override can see them, which would break copy → paste →
- * click end-to-end. Everything else delegates to `defaultUrlTransform`.
+ * `urlTransform` for `<ReactMarkdown>` that preserves supported `buzz://`
+ * links. The default transform strips unknown schemes before component
+ * overrides can route them in-app.
  */
 export function messageLinkUrlTransform(value: string, key: string): string {
-  if (key === "href" && isMessageLink(value)) {
+  if (key === "href" && (isMessageLink(value) || isProjectLink(value))) {
     return value;
   }
   return defaultUrlTransform(value);

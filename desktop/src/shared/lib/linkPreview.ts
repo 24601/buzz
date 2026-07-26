@@ -1,7 +1,17 @@
+import {
+  parseProjectLink,
+  type ParsedProjectLink,
+} from "../../features/projects/lib/projectLink.ts";
+
 export type SupportedLinkPreviewKind =
   | "github-pull-request"
   | "github-issue"
   | "github-repository"
+  | "buzz-pull-request"
+  | "buzz-issue"
+  | "buzz-repository"
+  | "buzz-patch"
+  | "buzz-commit"
   | "linear-issue"
   | "google-drive-file"
   | "google-drive-folder"
@@ -14,6 +24,7 @@ export type SupportedLinkPreview = {
   href: string;
   provider:
     | "GitHub"
+    | "Buzz"
     | "Linear"
     | "Google Drive"
     | "Google Docs"
@@ -24,17 +35,20 @@ export type SupportedLinkPreview = {
     | "PR"
     | "issue"
     | "repo"
+    | "patch"
+    | "commit"
     | "file"
     | "folder"
     | "document"
     | "spreadsheet"
     | "presentation";
+  projectLink?: ParsedProjectLink;
 };
 
 const SUPPORTED_URL_RE =
-  /(^|[\s([{<>"'])((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+)/gi;
+  /(^|[\s([{<>"'])((?:(?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^\s<>"'\]]+|buzz:\/\/git\?[^\s<>"'\]]+))/gi;
 const MARKDOWN_SUPPORTED_LINK_RE =
-  /!?\[([^\]\n]+)\]\(((?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+)\)/gi;
+  /!?\[([^\]\n]+)\]\(((?:(?:https?:\/\/)?(?:(?:www\.)?github\.com|(?:www\.)?linear\.app|drive\.google\.com|docs\.google\.com)\/[^)\s<>"']+|buzz:\/\/git\?[^)\s<>"']+))\)/gi;
 const MAX_PREVIEWS = 8;
 
 type HiddenRange = {
@@ -256,6 +270,7 @@ function createPreview(
   provider: SupportedLinkPreview["provider"],
   typeLabel: SupportedLinkPreview["typeLabel"],
   title: string,
+  projectLink?: ParsedProjectLink,
 ): SupportedLinkPreview {
   return {
     kind,
@@ -263,7 +278,62 @@ function createPreview(
     provider,
     title,
     typeLabel,
+    ...(projectLink ? { projectLink } : {}),
   };
+}
+
+function parseBuzzProjectLink(href: string): SupportedLinkPreview | null {
+  const link = parseProjectLink(href);
+  if (!link) return null;
+
+  const shortId = link.entityId?.slice(0, 8);
+  switch (link.type) {
+    case "repository":
+      return createPreview(
+        "buzz-repository",
+        new URL(link.href),
+        "Buzz",
+        "repo",
+        link.repoId,
+        link,
+      );
+    case "pull-request":
+      return createPreview(
+        "buzz-pull-request",
+        new URL(link.href),
+        "Buzz",
+        "PR",
+        `${link.repoId} #${shortId}`,
+        link,
+      );
+    case "issue":
+      return createPreview(
+        "buzz-issue",
+        new URL(link.href),
+        "Buzz",
+        "issue",
+        `${link.repoId} #${shortId}`,
+        link,
+      );
+    case "patch":
+      return createPreview(
+        "buzz-patch",
+        new URL(link.href),
+        "Buzz",
+        "patch",
+        `${link.repoId} ${shortId}`,
+        link,
+      );
+    case "commit":
+      return createPreview(
+        "buzz-commit",
+        new URL(link.href),
+        "Buzz",
+        "commit",
+        `${link.repoId} ${shortId}`,
+        link,
+      );
+  }
 }
 
 function parseGithubLink(parsed: URL): SupportedLinkPreview | null {
@@ -417,9 +487,12 @@ function parseGoogleDocsLink(parsed: URL): SupportedLinkPreview | null {
 export function parseSupportedLinkPreview(
   href: string,
 ): SupportedLinkPreview | null {
+  const candidate = trimUrlCandidate(href);
+  const projectPreview = parseBuzzProjectLink(candidate);
+  if (projectPreview) return projectPreview;
+
   let parsed: URL;
   try {
-    const candidate = trimUrlCandidate(href);
     parsed = new URL(
       /^https?:\/\//i.test(candidate) ? candidate : `https://${candidate}`,
     );

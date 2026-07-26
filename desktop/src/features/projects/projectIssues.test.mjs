@@ -13,6 +13,9 @@ const OWNER = "a".repeat(64);
 const AUTHOR = "b".repeat(64);
 const ATTACKER = "c".repeat(64);
 const REPO_ADDRESS = `30617:${OWNER}:demo`;
+const SOURCE_MESSAGE = "d".repeat(64);
+const SOURCE_CHANNEL = "11111111-1111-4111-8111-111111111111";
+const SOURCE_LINK = `buzz://message?channel=${SOURCE_CHANNEL}&id=${SOURCE_MESSAGE}`;
 
 function issueEvent(overrides = {}) {
   return {
@@ -97,6 +100,20 @@ test("tag helpers drop malformed value-less tags", () => {
   assert.deepEqual(issue.labels, ["bug"]);
   assert.equal(issue.status, PROJECT_ISSUE_STATUS.BACKLOG);
   assert.equal(issue.title, "Something is broken");
+});
+
+test("preserves only valid source message backlinks", () => {
+  const linked = issueEvent();
+  linked.tags.push(["buzz-source", SOURCE_LINK]);
+  assert.equal(eventToProjectIssue(linked).sourceMessageLink, SOURCE_LINK);
+
+  const malformed = issueEvent();
+  malformed.tags.push([
+    "buzz-source",
+    "https://example.com/?channel=source-channel&id=not-an-event",
+  ]);
+  assert.equal(eventToProjectIssue(malformed).sourceMessageLink, null);
+  assert.equal(eventToProjectIssue(issueEvent()).sourceMessageLink, null);
 });
 
 test("builds repository-scoped issue creation tags", () => {

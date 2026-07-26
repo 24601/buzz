@@ -21,6 +21,7 @@ import {
   commitAuthorPubkeysFromPullRequests,
   type ViewerGitIdentity,
 } from "@/features/projects/lib/projectContributorMatching";
+import { useProjectCommitSourceMessageQuery } from "@/features/projects/useProjectCommitSourceMessage";
 import type { UserProfileLookup } from "@/features/profile/lib/identity";
 import { Button } from "@/shared/ui/button";
 import { Tabs, TabsContent } from "@/shared/ui/tabs";
@@ -190,6 +191,10 @@ export function WorkspaceTabs({
   const commitAuthorPubkeys = React.useMemo(
     () => commitAuthorPubkeysFromPullRequests(pullRequests),
     [pullRequests],
+  );
+  const commitSourceMessageQuery = useProjectCommitSourceMessageQuery(
+    project,
+    selectedCommitHash,
   );
   const selectedPullRequest =
     pullRequests.find(
@@ -387,6 +392,7 @@ export function WorkspaceTabs({
             }
             commitAuthorPubkeys={commitAuthorPubkeys}
             commitHash={selectedCommitHash}
+            sourceMessageLink={commitSourceMessageQuery.data ?? null}
             viewerGitIdentity={viewerGitIdentity}
             diff={commitDiff}
             diffError={commitDiffError}

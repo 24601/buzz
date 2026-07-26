@@ -7,6 +7,9 @@ import {
   parseSupportedLinkPreview,
 } from "./linkPreview.ts";
 
+const BUZZ_OWNER = "a".repeat(64);
+const BUZZ_EVENT_ID = "b".repeat(64);
+
 test("parseSupportedLinkPreview parses GitHub pull request URLs", () => {
   assert.deepEqual(
     parseSupportedLinkPreview("https://github.com/block/sprout/pull/1234"),
@@ -51,6 +54,25 @@ test("parseSupportedLinkPreview ignores unsupported GitHub URLs", () => {
     parseSupportedLinkPreview("https://github.com/block/sprout/tree/main"),
     null,
   );
+});
+
+test("parseSupportedLinkPreview parses Buzz git entity links", () => {
+  const href = `buzz://git?repo=${BUZZ_OWNER}%3Abuzz&type=issue&id=${BUZZ_EVENT_ID}`;
+  assert.deepEqual(parseSupportedLinkPreview(href), {
+    kind: "buzz-issue",
+    href,
+    provider: "Buzz",
+    title: "buzz #bbbbbbbb",
+    typeLabel: "issue",
+    projectLink: {
+      href,
+      projectId: `${BUZZ_OWNER}:buzz`,
+      owner: BUZZ_OWNER,
+      repoId: "buzz",
+      type: "issue",
+      entityId: BUZZ_EVENT_ID,
+    },
+  });
 });
 
 test("parseSupportedLinkPreview parses Linear issue URLs", () => {
@@ -111,6 +133,30 @@ test("extractSupportedLinkPreviews returns unique supported links in order", () 
       ].join(" "),
     ).map((preview) => preview.title),
     ["block/sprout #1", "BUG-2", "Document"],
+  );
+});
+
+test("extractSupportedLinkPreviews extracts labeled Buzz git links", () => {
+  const href = `buzz://git?repo=${BUZZ_OWNER}%3Abuzz&type=pull-request&id=${BUZZ_EVENT_ID}`;
+  assert.deepEqual(
+    extractSupportedLinkPreviews(`[Fix activity links](${href})`),
+    [
+      {
+        kind: "buzz-pull-request",
+        href,
+        provider: "Buzz",
+        title: "Fix activity links",
+        typeLabel: "PR",
+        projectLink: {
+          href,
+          projectId: `${BUZZ_OWNER}:buzz`,
+          owner: BUZZ_OWNER,
+          repoId: "buzz",
+          type: "pull-request",
+          entityId: BUZZ_EVENT_ID,
+        },
+      },
+    ],
   );
 });
 

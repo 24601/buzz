@@ -1,5 +1,14 @@
-import { ExternalLink } from "lucide-react";
+import {
+  ArrowRight,
+  CircleDot,
+  ExternalLink,
+  GitBranch,
+  GitCommitHorizontal,
+  GitPullRequest,
+  ScrollText,
+} from "lucide-react";
 
+import { useAppNavigation } from "@/app/navigation/useAppNavigation";
 import type { SupportedLinkPreview } from "@/shared/lib/linkPreview";
 import { cn } from "@/shared/lib/cn";
 import {
@@ -95,6 +104,16 @@ function LinkPreviewLogo({ preview }: { preview: SupportedLinkPreview }) {
     case "github-pull-request":
     case "github-repository":
       return <GitHubLogo className="h-4 w-4" />;
+    case "buzz-repository":
+      return <GitBranch className="h-4 w-4" />;
+    case "buzz-pull-request":
+      return <GitPullRequest className="h-4 w-4" />;
+    case "buzz-issue":
+      return <CircleDot className="h-4 w-4" />;
+    case "buzz-patch":
+      return <ScrollText className="h-4 w-4" />;
+    case "buzz-commit":
+      return <GitCommitHorizontal className="h-4 w-4" />;
     case "linear-issue":
       return <LinearLogo className="h-4 w-4" />;
     case "google-drive-file":
@@ -116,6 +135,32 @@ export function LinkPreviewAttachment({
   className?: string;
   preview: SupportedLinkPreview;
 }) {
+  const { goProject } = useAppNavigation();
+  const projectLink = preview.projectLink;
+  const openProjectLink = () => {
+    if (!projectLink) return;
+    if (projectLink.type === "issue") {
+      void goProject(projectLink.projectId, {
+        issueId: projectLink.entityId ?? undefined,
+      });
+      return;
+    }
+    if (projectLink.type === "pull-request") {
+      void goProject(projectLink.projectId, {
+        pullRequestId: projectLink.entityId ?? undefined,
+      });
+      return;
+    }
+    if (projectLink.type === "commit") {
+      void goProject(projectLink.projectId, {
+        commitHash: projectLink.entityId ?? undefined,
+      });
+      return;
+    }
+    void goProject(projectLink.projectId);
+  };
+  const openLabel = `Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`;
+
   return (
     <Attachment
       className={cn(
@@ -136,22 +181,37 @@ export function LinkPreviewAttachment({
         <AttachmentTitle>{preview.title}</AttachmentTitle>
       </AttachmentContent>
       <AttachmentActions>
-        <ExternalLink
-          aria-hidden="true"
-          className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
-        />
+        {projectLink ? (
+          <ArrowRight
+            aria-hidden="true"
+            className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
+          />
+        ) : (
+          <ExternalLink
+            aria-hidden="true"
+            className="h-4 w-4 text-muted-foreground opacity-0 transition-opacity group-hover/attachment:opacity-100 group-focus-within/attachment:opacity-100"
+          />
+        )}
       </AttachmentActions>
       <AttachmentTrigger asChild>
-        <a
-          aria-label={`Open ${preview.provider} ${preview.typeLabel}: ${preview.title}`}
-          href={preview.href}
-          rel="noreferrer"
-          target="_blank"
-        >
-          <span className="sr-only">
-            Open {preview.provider} {preview.typeLabel}: {preview.title}
-          </span>
-        </a>
+        {projectLink ? (
+          <button
+            aria-label={openLabel}
+            type="button"
+            onClick={openProjectLink}
+          >
+            <span className="sr-only">{openLabel}</span>
+          </button>
+        ) : (
+          <a
+            aria-label={openLabel}
+            href={preview.href}
+            rel="noreferrer"
+            target="_blank"
+          >
+            <span className="sr-only">{openLabel}</span>
+          </a>
+        )}
       </AttachmentTrigger>
     </Attachment>
   );

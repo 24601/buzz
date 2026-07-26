@@ -280,6 +280,28 @@ test("supported link previews keep the message link visible", async ({
   await expectSmoothCorners(previewCard);
 });
 
+test("Buzz repository links render cards and navigate in-app", async ({
+  page,
+}) => {
+  const projectId = `${TEST_IDENTITIES.tyler.pubkey}:buzz`;
+  const previewUrl = `buzz://git?repo=${encodeURIComponent(projectId)}&type=repository`;
+
+  await page.goto("/");
+  await page.getByTestId("channel-general").click();
+  await page
+    .getByTestId("message-input")
+    .fill(`[Open the Buzz repository](${previewUrl})`);
+  await page.getByTestId("send-message").click();
+
+  const row = page.getByTestId("message-row").last();
+  const previewCard = row.locator('[data-link-preview="buzz-repository"]');
+  await expect(previewCard).toBeVisible();
+  await previewCard.getByRole("button", { name: /Open Buzz repo/ }).click();
+  await expect(page).toHaveURL(
+    new RegExp(`/projects/${encodeURIComponent(projectId)}`),
+  );
+});
+
 test("send multiple messages in sequence", async ({ page }) => {
   const ts = Date.now();
   const messages = [

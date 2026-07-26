@@ -19,6 +19,7 @@ import {
   resolveMessageLinkRenderTarget,
   type ParsedMessageLink,
 } from "@/features/messages/lib/messageLink";
+import { parseProjectLink } from "@/features/projects/lib/projectLink";
 import { UserProfilePopover } from "@/features/profile/ui/UserProfilePopover";
 import { invokeTauri } from "@/shared/api/tauri";
 import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext";
@@ -1363,6 +1364,7 @@ function createMarkdownComponents(
     href,
     ...props
   }: React.ComponentPropsWithoutRef<"a">) {
+    const { goProject } = useAppNavigation();
     const {
       channels,
       imetaByUrl,
@@ -1463,6 +1465,37 @@ function createMarkdownComponents(
       }
       // Malformed message deep link — fall through to the default
       // anchor (renders as a normal external link).
+    }
+
+    const projectLink = href ? parseProjectLink(href) : null;
+    if (projectLink) {
+      return (
+        <a
+          {...props}
+          className="cursor-pointer font-medium text-primary underline underline-offset-4 transition-colors hover:text-primary/80"
+          href={projectLink.href}
+          onClick={(event) => {
+            event.preventDefault();
+            if (projectLink.type === "issue") {
+              void goProject(projectLink.projectId, {
+                issueId: projectLink.entityId ?? undefined,
+              });
+            } else if (projectLink.type === "pull-request") {
+              void goProject(projectLink.projectId, {
+                pullRequestId: projectLink.entityId ?? undefined,
+              });
+            } else if (projectLink.type === "commit") {
+              void goProject(projectLink.projectId, {
+                commitHash: projectLink.entityId ?? undefined,
+              });
+            } else {
+              void goProject(projectLink.projectId);
+            }
+          }}
+        >
+          {children}
+        </a>
+      );
     }
 
     const supportedLinkPreview = href ? parseSupportedLinkPreview(href) : null;

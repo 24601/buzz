@@ -55,6 +55,7 @@ import {
   projectPullRequestEventsToPullRequests,
 } from "./projectPullRequests.mjs";
 import { fetchProjectsWorkItems } from "./projectWorkItems";
+import { sourceMessageLinkFromEvent } from "./projectSourceMessage.mjs";
 
 export type {
   ProjectIssue,
@@ -77,6 +78,7 @@ export type Project = {
   contributors: string[];
   createdAt: number;
   projectChannelId: string | null;
+  sourceMessageLink: string | null;
   status: string;
   defaultBranch: string;
   repoAddress: string;
@@ -183,9 +185,8 @@ function isDeletedByA(project: Project, deletionEvents: RelayEvent[]): boolean {
 /**
  * Converts a kind:30617 repo announcement into a `Project`.
  *
- * `relayOrigin` is the resolved relay HTTP origin (from `getCachedRelayOrigin`)
- * used to synthesize a canonical clone URL when the announcement omits an
- * explicit `clone` tag. Callers outside the relay-connected app (e.g. unit
+ * `relayOrigin` synthesizes a canonical clone URL when the announcement omits
+ * a `clone` tag. Callers outside the relay-connected app (e.g. unit
  * tests) may omit it, in which case no default is derived.
  */
 export function eventToProject(
@@ -224,6 +225,7 @@ export function eventToProject(
     contributors,
     createdAt: event.created_at,
     projectChannelId,
+    sourceMessageLink: sourceMessageLinkFromEvent(event),
     status: getTag(event, "status") ?? "active",
     defaultBranch: getTag(event, "default-branch") ?? "main",
     repoAddress: projectCoordinate({ owner: event.pubkey, dtag: d }),
