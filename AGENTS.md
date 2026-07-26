@@ -573,3 +573,69 @@ just mobile-dev
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+---
+
+## Cursor Cloud specific instructions
+
+The Cloud VM snapshot already has the toolchain (Hermit), system deps
+(`docker`, `libssl-dev`/`pkg-config`, Playwright Chromium) and cached
+`node_modules` + Cargo deps. The startup update script only refreshes deps
+(`./bin/pnpm install` + `./bin/cargo fetch`); it does **not** start Docker,
+services, or the relay. Do those yourself with the notes below.
+
+**Activate the toolchain + env in every shell** before running anything:
+`. ./bin/activate-hermit && set -a && source .env && set +a`. If `.env` is
+missing, `cp .env.example .env` first. Standalone `./bin/<tool>` shims also
+work without activation.
+
+**Docker does not auto-start and needs a cgroup-v2 fix (fresh boot each run).**
+The daemon must be started manually, and this nested VM needs the cgroup
+delegation workaround or containers fail with `cannot enter cgroupv2
+"/sys/fs/cgroup/docker" ... invalid state`. One-time per boot, as root:
+
+```bash
+# 1. start dockerd (config already pins fuse-overlayfs + containerd-snapshotter=false)
+sudo nohup dockerd >/tmp/dockerd.log 2>&1 &
+sleep 8 && sudo chmod 666 /var/run/docker.sock
+# 2. cgroup v2 delegation: move all root procs into a leaf, then enable controllers
+sudo bash -c '
+  echo "" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null
+  echo -cpuset -cpu -pids > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+  mkdir -p /sys/fs/cgroup/init
+  for p in $(cat /sys/fs/cgroup/cgroup.procs); do echo $p > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done
+  echo "+cpuset +cpu +io +memory +hugetlb +pids" > /sys/fs/cgroup/cgroup.subtree_control'
+```
+
+If `docker run --rm hello-world` works, you are good. (If the daemon was
+started before the cgroup fix, restart it after applying the fix.)
+
+**Bring up backend services + DB (services are NOT in the update script):**
+
+```bash
+docker compose up -d                      # postgres, redis, minio (+adminer/keycloak/prometheus)
+cargo run -p buzz-admin -- migrate        # migrations are NOT auto-run
+./scripts/seed-local-community.sh         # seed row-zero community hosts (relay 404s without it)
+```
+
+`just relay` / `just dev` also run migrations + seed via `_ensure-migrations`,
+but `just dev` (native Tauri shell) cannot run headless.
+
+**Run the relay headless:** `./target/debug/buzz-relay` (or `just relay`).
+WS+HTTP on `:3000`, health on `:8080` (`/_liveness`, `/_readiness`), metrics
+`:9102`. The relay is the core backend; every client talks to it.
+
+**CLI = the headless E2E driver.** `crates/buzz-cli/TESTING.md` is partly
+stale: `buzz-admin` has **no `mint-token`** — use `buzz-admin generate-key`,
+then `export BUZZ_PRIVATE_KEY=<secret hex>` and
+`export BUZZ_RELAY_URL=http://localhost:3000`. Dev `.env` leaves
+`BUZZ_REQUIRE_AUTH_TOKEN` unset, so a bare private key authenticates with all
+self-mintable scopes (channels/messages/users/etc.). Smoke test:
+`buzz channels create --name x --type stream --visibility open` →
+`buzz messages send --channel <id> --content hi` → `buzz messages get --channel <id>`.
+
+**Lint/test/build already verified in this env:**
+- Rust lint: `cargo fmt --all -- --check` and `cargo clippy --workspace --all-targets -- -D warnings` (clippy `--all-targets` needs `libssl-dev`+`pkg-config` for `openssl-sys`, already installed).
+- Rust unit tests: `just test-unit`. `cargo-nextest` is not installed, so it falls back to `scripts/run-tests.sh unit`. One pre-existing failure — `buzz-db` lib test `replica_fence::tests::fence_starts_closed_and_opens_on_advance` — fails on this host because the clock exposes sub-microsecond precision and the fence stores microseconds; it is unrelated to environment setup. All other unit crates pass.
+- JS: `just web-check`, `just desktop-check` (biome lint), `just desktop-test` (3500+ node tests), `just web-build`, `just desktop-build`.
+- Desktop screenshots: `just desktop-screenshot --name home` (Playwright + mock bridge; Chromium is installed). The native Tauri shell (`just dev`) and the Flutter iOS simulator (`just mobile-dev`) cannot run in this headless Linux VM.
