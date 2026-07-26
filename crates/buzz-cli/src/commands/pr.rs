@@ -1,4 +1,7 @@
 use crate::client::BuzzClient;
+use crate::commands::git_activity::{
+    parse_git_conversation_context, publish_git_event, GitEntityType,
+};
 use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
@@ -32,11 +35,13 @@ pub async fn cmd_open_pr(
     labels: &[String],
     to: &[String],
     channel: Option<&str>,
+    source_message: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_optional_body(body, body_file)?;
+    let context = parse_git_conversation_context(channel, source_message)?;
 
     let repo = GitRepoCoord {
         owner: repo_owner.to_string(),
@@ -45,7 +50,8 @@ pub async fn cmd_open_pr(
     let meta = GitPullRequestMeta {
         euc: euc.map(str::to_string),
         recipients: to.to_vec(),
-        channel_id: channel.map(str::to_string),
+        channel_id: context.channel_id.clone(),
+        source_message: context.source_message.clone(),
         subject: subject.to_string(),
         labels: labels.to_vec(),
         commit: commit.to_string(),
@@ -56,10 +62,16 @@ pub async fn cmd_open_pr(
     };
 
     let builder = buzz_sdk::build_git_pull_request(&repo, &content, &meta).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{resp}");
-    Ok(())
+    publish_git_event(
+        client,
+        builder,
+        &context,
+        GitEntityType::PullRequest,
+        subject,
+        repo_owner,
+        repo_id,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -230,6 +242,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             label,
             to,
             channel,
+            source_message,
             revision_of,
         } => {
             cmd_open_pr(
@@ -247,6 +260,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 &label,
                 &to,
                 channel.as_deref(),
+                source_message.as_deref(),
                 revision_of.as_deref(),
             )
             .await

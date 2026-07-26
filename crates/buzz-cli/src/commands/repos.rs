@@ -5,8 +5,11 @@ use buzz_core::{
 use nostr::{Event, EventBuilder, Tag, Timestamp};
 
 use crate::client::{normalize_write_response, BuzzClient};
+use crate::commands::git_activity::{
+    parse_git_conversation_context, publish_git_event, GitEntityType,
+};
 use crate::error::CliError;
-use crate::validate::validate_repo_id;
+use crate::validate::{sdk_err, validate_repo_id};
 
 fn parse_events(json: &str) -> Result<Vec<Event>, CliError> {
     serde_json::from_str(json)
@@ -207,8 +210,11 @@ pub async fn cmd_create_repo(
     clone_urls: &[String],
     web_url: Option<&str>,
     relays: &[String],
+    channel: Option<&str>,
+    source_message: Option<&str>,
 ) -> Result<(), CliError> {
     validate_repo_id(repo_id)?;
+    let context = parse_git_conversation_context(channel, source_message)?;
 
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
@@ -221,12 +227,26 @@ pub async fn cmd_create_repo(
         web_url,
         &relay_refs,
     )
-    .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?;
+    .map_err(|e| CliError::Other(format!("build_repo_announcement failed: {e}")))?
+    .tags(
+        buzz_sdk::build_git_conversation_tags(
+            context.channel_id.as_deref(),
+            context.source_message.as_ref(),
+        )
+        .map_err(sdk_err)?,
+    );
 
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{resp}");
-    Ok(())
+    let owner = client.keys().public_key().to_hex();
+    publish_git_event(
+        client,
+        builder,
+        &context,
+        GitEntityType::Repository,
+        name.unwrap_or(repo_id),
+        &owner,
+        repo_id,
+    )
+    .await
 }
 
 pub async fn cmd_get_repo(
@@ -356,6 +376,8 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             clone_urls,
             web,
             relays,
+            channel,
+            source_message,
         } => {
             cmd_create_repo(
                 client,
@@ -365,6 +387,8 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 &clone_urls,
                 web.as_deref(),
                 &relays,
+                channel.as_deref(),
+                source_message.as_deref(),
             )
             .await
         }

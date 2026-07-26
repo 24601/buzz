@@ -1,4 +1,7 @@
 use crate::client::BuzzClient;
+use crate::commands::git_activity::{
+    parse_git_conversation_context, publish_git_event, GitEntityType,
+};
 use crate::error::CliError;
 use crate::validate::{
     read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64, validate_repo_id,
@@ -20,10 +23,13 @@ pub async fn cmd_send_patch(
     parent_commit: Option<&str>,
     commit_pgp_sig: Option<&str>,
     committer: Option<&str>,
+    channel: Option<&str>,
+    source_message: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_file_or_stdin(patch)?;
+    let context = parse_git_conversation_context(channel, source_message)?;
 
     let committer = match committer {
         Some(spec) => Some(parse_committer(spec)?),
@@ -33,6 +39,8 @@ pub async fn cmd_send_patch(
     let meta = GitPatchMeta {
         euc: euc.map(str::to_string),
         recipients: to.to_vec(),
+        channel_id: context.channel_id.clone(),
+        source_message: context.source_message.clone(),
         reply_to: reply_to.map(str::to_string),
         root,
         root_revision,
@@ -48,10 +56,25 @@ pub async fn cmd_send_patch(
     };
 
     let builder = buzz_sdk::build_git_patch(&repo, &content, &meta).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{resp}");
-    Ok(())
+    let title = patch_activity_title(&content);
+    publish_git_event(
+        client,
+        builder,
+        &context,
+        GitEntityType::Patch,
+        title,
+        repo_owner,
+        repo_id,
+    )
+    .await
+}
+
+fn patch_activity_title(content: &str) -> &str {
+    content
+        .lines()
+        .find_map(|line| line.strip_prefix("Subject: ").map(str::trim))
+        .filter(|subject| !subject.is_empty())
+        .unwrap_or("patch")
 }
 
 /// Parse `--committer 'name|email|timestamp|tz-offset-minutes'`.
@@ -219,6 +242,8 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
             parent_commit,
             commit_pgp_sig,
             committer,
+            channel,
+            source_message,
         } => {
             cmd_send_patch(
                 client,
@@ -234,6 +259,8 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
                 parent_commit.as_deref(),
                 commit_pgp_sig.as_deref(),
                 committer.as_deref(),
+                channel.as_deref(),
+                source_message.as_deref(),
             )
             .await
         }
@@ -298,6 +325,15 @@ mod tests {
     fn parse_committer_rejects_wrong_field_count() {
         assert!(parse_committer("Jane Doe|jane@example.com").is_err());
         assert!(parse_committer("a|b|c|d|e").is_err());
+    }
+
+    #[test]
+    fn patch_activity_title_uses_format_patch_subject() {
+        assert_eq!(
+            patch_activity_title("From abc\nSubject: [PATCH] Fix parser\n\nbody"),
+            "[PATCH] Fix parser"
+        );
+        assert_eq!(patch_activity_title("diff --git a/x b/x"), "patch");
     }
 
     #[test]

@@ -1,4 +1,7 @@
 use crate::client::BuzzClient;
+use crate::commands::git_activity::{
+    parse_git_conversation_context, publish_git_event, GitEntityType,
+};
 use crate::error::CliError;
 use crate::validate::{read_or_stdin, sdk_err, validate_hex64, validate_repo_id};
 use buzz_sdk::{GitIssueMeta, GitRepoCoord, GitStatusMeta};
@@ -11,14 +14,19 @@ pub async fn cmd_create_issue(
     content: &str,
     labels: &[String],
     to: &[String],
+    channel: Option<&str>,
+    source_message: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let body = read_or_stdin(content)?;
+    let context = parse_git_conversation_context(channel, source_message)?;
 
     let meta = GitIssueMeta {
         labels: labels.to_vec(),
         recipients: to.to_vec(),
+        channel_id: context.channel_id.clone(),
+        source_message: context.source_message.clone(),
     };
 
     let repo = GitRepoCoord {
@@ -27,10 +35,16 @@ pub async fn cmd_create_issue(
     };
 
     let builder = buzz_sdk::build_git_issue(&repo, subject, &body, &meta).map_err(sdk_err)?;
-    let event = client.sign_event(builder)?;
-    let resp = client.submit_event(event).await?;
-    println!("{resp}");
-    Ok(())
+    publish_git_event(
+        client,
+        builder,
+        &context,
+        GitEntityType::Issue,
+        subject,
+        repo_owner,
+        repo_id,
+    )
+    .await
 }
 
 pub async fn cmd_get_issue(client: &BuzzClient, event: &str) -> Result<(), CliError> {
@@ -154,7 +168,22 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             content,
             label,
             to,
-        } => cmd_create_issue(client, &repo_owner, &repo_id, &title, &content, &label, &to).await,
+            channel,
+            source_message,
+        } => {
+            cmd_create_issue(
+                client,
+                &repo_owner,
+                &repo_id,
+                &title,
+                &content,
+                &label,
+                &to,
+                channel.as_deref(),
+                source_message.as_deref(),
+            )
+            .await
+        }
         IssuesCmd::Get { event } => cmd_get_issue(client, &event).await,
         IssuesCmd::List {
             repo_owner,

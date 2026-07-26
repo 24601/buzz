@@ -1113,6 +1113,12 @@ pub enum ReposCmd {
         /// Preferred Nostr relay(s) for repo discovery — can be specified multiple times
         #[arg(long = "nostr-relay")]
         relays: Vec<String>,
+        /// Buzz channel where this repository was created
+        #[arg(long)]
+        channel: Option<String>,
+        /// Triggering Buzz message event ID; requires --channel
+        #[arg(long, requires = "channel")]
+        source_message: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1232,6 +1238,12 @@ pub enum PatchesCmd {
         /// Committer identity: 'name|email|timestamp|tz-offset-minutes'
         #[arg(long)]
         committer: Option<String>,
+        /// Buzz channel where this patch originated
+        #[arg(long)]
+        channel: Option<String>,
+        /// Triggering Buzz message event ID; requires --channel
+        #[arg(long, requires = "channel")]
+        source_message: Option<String>,
     },
     /// Get a patch by event id
     Get {
@@ -1341,6 +1353,9 @@ pub enum PrCmd {
         /// Channel where this pull request originated (NIP-29 h-tag)
         #[arg(long)]
         channel: Option<String>,
+        /// Triggering Buzz message event ID; requires --channel
+        #[arg(long, requires = "channel")]
+        source_message: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1461,6 +1476,12 @@ pub enum IssuesCmd {
         /// Additional recipient pubkey(s) — can be specified multiple times
         #[arg(long = "to")]
         to: Vec<String>,
+        /// Buzz channel where this issue originated
+        #[arg(long)]
+        channel: Option<String>,
+        /// Triggering Buzz message event ID; requires --channel
+        #[arg(long, requires = "channel")]
+        source_message: Option<String>,
     },
     /// Get an issue by event id
     Get {
@@ -1801,6 +1822,76 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn git_source_message_flags_require_channel() {
+        let owner = "a".repeat(64);
+        let source = "b".repeat(64);
+        let commit = "c".repeat(40);
+        let cases = vec![
+            vec![
+                "buzz".to_string(),
+                "repos".into(),
+                "create".into(),
+                "--id".into(),
+                "repo".into(),
+                "--source-message".into(),
+                source.clone(),
+            ],
+            vec![
+                "buzz".into(),
+                "issues".into(),
+                "create".into(),
+                "--repo-owner".into(),
+                owner.clone(),
+                "--repo-id".into(),
+                "repo".into(),
+                "--title".into(),
+                "Issue".into(),
+                "--content".into(),
+                "Body".into(),
+                "--source-message".into(),
+                source.clone(),
+            ],
+            vec![
+                "buzz".into(),
+                "pr".into(),
+                "open".into(),
+                "--repo-owner".into(),
+                owner.clone(),
+                "--repo-id".into(),
+                "repo".into(),
+                "--subject".into(),
+                "PR".into(),
+                "--commit".into(),
+                commit,
+                "--clone".into(),
+                "https://example.com/repo.git".into(),
+                "--source-message".into(),
+                source.clone(),
+            ],
+            vec![
+                "buzz".into(),
+                "patches".into(),
+                "send".into(),
+                "--repo-owner".into(),
+                owner,
+                "--repo-id".into(),
+                "repo".into(),
+                "--patch-file".into(),
+                "-".into(),
+                "--source-message".into(),
+                source,
+            ],
+        ];
+
+        for args in cases {
+            let error = Cli::try_parse_from(args)
+                .err()
+                .expect("--channel must be required");
+            assert!(error.to_string().contains("--channel"));
+        }
     }
 
     #[test]
