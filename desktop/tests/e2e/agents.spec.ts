@@ -1358,7 +1358,10 @@ test("people sharing blocks a timeout before encoding or upload", async ({
   });
 
   await page.getByTestId("persona-share-send").click();
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible();
+  await expect(page.getByText("Couldn’t send agent.")).toBeVisible();
+  await expect(
+    page.getByText("You are currently timed out and cannot send messages."),
+  ).toBeVisible();
 
   const commands = await readAgentShareCommands(page);
   expect(
@@ -1403,9 +1406,14 @@ test("people sharing rechecks destination eligibility after encoding", async ({
     return testWindow.__BUZZ_E2E_INVALIDATE_CHANNELS__?.();
   });
 
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toBeVisible({
+  await expect(page.getByText("Couldn’t send agent.")).toBeVisible({
     timeout: 5_000,
   });
+  await expect(
+    page.getByText(
+      "The selected destination is no longer available. Please pick another.",
+    ),
+  ).toBeVisible();
   const commands = await readAgentShareCommands(page);
   expect(
     commands.filter(
@@ -1434,9 +1442,7 @@ test("people sharing guards the full action against duplicate sends", async ({
   await expect(page.getByText("Sent a copy of Safety Auditor")).toBeVisible({
     timeout: 5_000,
   });
-  await expect(page.getByText("Couldn’t send agent. Try again.")).toHaveCount(
-    0,
-  );
+  await expect(page.getByText("Couldn’t send agent.")).toHaveCount(0);
   const commands = await readAgentShareCommands(page);
   for (const command of [
     "open_dm",
@@ -1462,6 +1468,47 @@ test("people sharing stays mounted while a send is pending", async ({
   await expect(page.getByText("Sent a copy of Safety Auditor")).toBeVisible({
     timeout: 5_000,
   });
+});
+
+test("copy link surfaces the upload failure reason in the toast", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, {
+    uploadError:
+      "relay returned 422 Unprocessable Entity: media contains metadata or a non-canonical metadata channel",
+  });
+
+  await page.getByTestId("persona-share-copy-link").click();
+
+  await expect(page.getByText("Couldn’t copy link.")).toBeVisible();
+  await expect(
+    page.getByText(
+      "relay returned 422 Unprocessable Entity: media contains metadata or a non-canonical metadata channel",
+    ),
+  ).toBeVisible();
+  // The action must recover to idle so the user can retry.
+  await expect(page.getByTestId("persona-share-copy-link")).toContainText(
+    "Copy link",
+  );
+});
+
+test("people sharing surfaces the upload failure reason in the toast", async ({
+  page,
+}) => {
+  await openSafetyShareDialog(page, {
+    uploadError: "relay returned 413 Payload Too Large: blob exceeds limit",
+  });
+  await selectCharlieRecipient(page);
+  await page.getByTestId("persona-share-send").click();
+
+  await expect(page.getByText("Couldn’t send agent.")).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(
+    page.getByText(
+      "Upload failed: relay returned 413 Payload Too Large: blob exceeds limit",
+    ),
+  ).toBeVisible();
 });
 
 test("export from share aligns selections and animates memory details", async ({

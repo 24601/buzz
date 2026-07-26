@@ -371,6 +371,13 @@ export type UseSnapshotSendControllerResult = {
     resolveChannelId: () => Promise<string>,
     attachmentLabel?: string,
   ) => Promise<boolean | null>;
+  /**
+   * Read the most recent failure reason synchronously. Unlike `state.error`
+   * (a render snapshot, stale inside the closure that awaited `beginSend`),
+   * this reads a ref updated by the pipeline itself, so a caller can surface
+   * the reason in a toast immediately after `beginSend` resolves false.
+   */
+  getLastError: () => string | null;
   reset: () => void;
 };
 
@@ -389,6 +396,16 @@ export function useSnapshotSendController(
     phase: "idle",
     error: null,
   });
+
+  // Mirror of `state.error` readable synchronously after `beginSend`
+  // resolves. The closure that awaited `beginSend` captured a pre-send render
+  // snapshot of `state`, so it cannot see the failure reason through
+  // `state.error`; this ref can.
+  const lastErrorRef = React.useRef<string | null>(null);
+  const setStateTracked = React.useCallback((next: SnapshotSendState) => {
+    lastErrorRef.current = next.error;
+    setState(next);
+  }, []);
 
   // Single-concurrency guard covering the full encode → upload → send action.
   // Stored in a ref so it survives re-renders without triggering effects.
@@ -417,7 +434,7 @@ export function useSnapshotSendController(
         checkEligibilityFn: () => checkSendEligibility(queryClient, channelId),
         uploadFn: (bytes, filename) => uploadMediaBytes(bytes, filename),
         sendFn: (args) => sendMutation.mutateAsync(args),
-        setStateFn: setState,
+        setStateFn: setStateTracked,
         buildMessageFn: (descriptor) => {
           const message = buildOutgoingMessage("", [descriptor]);
           return attachmentLabel?.trim()
@@ -430,15 +447,15 @@ export function useSnapshotSendController(
             : message;
         },
       }),
-      setState,
+      setStateTracked,
     );
   }
 
   const reset = React.useCallback(() => {
     if (!guardRef.current.inFlight) {
-      setState({ phase: "idle", error: null });
+      setStateTracked({ phase: "idle", error: null });
     }
-  }, []);
+  }, [setStateTracked]);
 
   return {
     isDmSafetyReady:
@@ -448,6 +465,7 @@ export function useSnapshotSendController(
     relaySelfPubkey: relaySelfQuery.data ?? null,
     state,
     beginSend,
+    getLastError: () => lastErrorRef.current,
     reset,
   };
 }

@@ -337,6 +337,12 @@ type MockBridgeOptions = {
    * message — lets specs prove malformed/hash/size-mismatch error paths.
    */
   snapshotFetchError?: string;
+  /**
+   * When set to a non-empty string, `upload_media_bytes` rejects with this
+   * message — lets specs prove upload-failure toasts (e.g. a relay that
+   * rejects snapshot PNG metadata) surface the real reason.
+   */
+  uploadError?: string;
   uploadDescriptors?: {
     url: string;
     sha256: string;

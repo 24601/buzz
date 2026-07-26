@@ -313,6 +313,12 @@ type E2eConfig = {
      * message — lets specs prove malformed/hash/size-mismatch error paths.
      */
     snapshotFetchError?: string;
+    /**
+     * When set to a non-empty string, `upload_media_bytes` rejects with this
+     * message — lets specs prove upload-failure toasts (e.g. a relay that
+     * rejects snapshot PNG metadata) surface the real reason.
+     */
+    uploadError?: string;
     uploadDescriptors?: RawBlobDescriptor[];
     // Seed rows returned by `list_save_subscriptions`. Each entry uses the same
     // snake_case wire shape the Rust backend returns so tests can drive the
@@ -10685,8 +10691,11 @@ export function maybeInstallE2eTauriMocks() {
         return await resolveMockUploadDescriptors(activeConfig);
       case "pick_and_upload_image":
         return (await resolveMockUploadDescriptors(activeConfig))[0] ?? null;
-      case "upload_media_bytes":
+      case "upload_media_bytes": {
+        const uploadError = activeConfig?.mock?.uploadError;
+        if (uploadError) throw new Error(uploadError);
         return (await resolveMockUploadDescriptors(activeConfig))[0];
+      }
       case "fetch_media_bytes": {
         // The real command fetches relay media through Rust reqwest and
         // replies with raw bytes (`tauri::ipc::Response` → ArrayBuffer). In

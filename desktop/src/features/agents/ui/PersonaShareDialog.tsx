@@ -385,9 +385,17 @@ export function SnapshotShareDialog({
         }),
       );
       setCopyStatus("copied");
-    } catch {
+    } catch (error) {
       setCopyStatus("idle");
-      toast.error("Couldn’t copy link. Try again.");
+      // Surface the underlying failure (e.g. the relay's upload rejection)
+      // instead of a generic retry hint — a bare "try again" hides
+      // deterministic failures like a relay that rejects snapshot PNGs.
+      toast.error("Couldn’t copy link.", {
+        description:
+          error instanceof Error && error.message.trim()
+            ? error.message
+            : "Try again.",
+      });
     }
   }
 
@@ -410,7 +418,14 @@ export function SnapshotShareDialog({
       toast.success(`Sent a copy of ${displayName}`);
       onOpenChange(false);
     } else if (sent === false) {
-      toast.error(`Couldn’t send ${itemLabel}. Try again.`);
+      // The controller records a specific failure reason (encode, upload,
+      // send, or eligibility) — show it rather than a generic retry hint.
+      // Read via getLastError(): this closure's `state` is a pre-send render
+      // snapshot, so state.error would still be null here.
+      const reason = snapshotSendController.getLastError()?.trim();
+      toast.error(`Couldn’t send ${itemLabel}.`, {
+        description: reason || "Try again.",
+      });
     }
   }
 
