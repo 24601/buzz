@@ -41,3 +41,38 @@ export function customEntries(
 export function isEditableEntry(entry: AcpRuntimeCatalogEntry): boolean {
   return entry.source === "custom";
 }
+
+/**
+ * Count managed agents whose effective harness is the given definition id —
+ * either a direct record-level `runtime` pin, or inheritance from a linked
+ * persona whose `runtime` is that id.
+ *
+ * Drives the delete-confirmation copy: deleting a harness that agents still
+ * reference is allowed (blocking would turn cleanup into dependency
+ * untangling), but the user is told those agents will stop launching.
+ */
+export function countAgentsReferencingHarness(
+  harnessId: string,
+  agents: ReadonlyArray<{ runtime: string | null; personaId: string | null }>,
+  personas: ReadonlyArray<{ id: string; runtime: string | null }>,
+): number {
+  const personaRuntime = new Map(personas.map((p) => [p.id, p.runtime]));
+  return agents.filter((agent) => {
+    if (agent.runtime !== null) return agent.runtime === harnessId;
+    if (agent.personaId === null) return false;
+    return personaRuntime.get(agent.personaId) === harnessId;
+  }).length;
+}
+
+/**
+ * Confirmation copy for deleting a custom harness. Names the blast radius
+ * when agents still reference the definition; stays quiet when none do.
+ */
+export function deleteHarnessConfirmMessage(
+  label: string,
+  referencingAgents: number,
+): string {
+  if (referencingAgents === 0) return `Delete ${label}?`;
+  const noun = referencingAgents === 1 ? "agent uses" : "agents use";
+  return `${referencingAgents} ${noun} this harness and will stop launching. Delete ${label}?`;
+}
