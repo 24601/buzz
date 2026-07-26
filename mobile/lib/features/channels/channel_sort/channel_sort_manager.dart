@@ -51,6 +51,12 @@ class ChannelSortManager {
   void Function()? _unsubscribe;
   bool _disposed = false;
 
+  /// Base delay for the startup-sync retry backoff. Overridable in tests.
+  final Duration _startupRetryBaseDelay;
+  Timer? _startupRetryTimer;
+  int _startupRetryAttempt = 0;
+  bool _startupFetchSucceeded = false;
+
   /// Unix seconds of the oldest unpublished local edit; 0 when clean.
   /// Persisted so unpublished edits survive manager teardown and restarts.
   int _dirtySince;
@@ -67,12 +73,15 @@ class ChannelSortManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
+    @visibleForTesting
+    Duration startupRetryBaseDelay = const Duration(seconds: 2),
   }) : _storage = ChannelSortStorage(prefs),
        _crypto = crypto,
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
+       _startupRetryBaseDelay = startupRetryBaseDelay,
        _store = ChannelSortStorage(prefs).read(pubkey),
        _dirtySince = ChannelSortStorage(prefs).readDirtySince(pubkey);
 
@@ -89,8 +98,20 @@ class ChannelSortManager {
       return;
     }
 
-    final foundRemote = await _fetchAndMerge();
-    await _startLiveSubscription();
+    await _syncWithRelay();
+    _onChanged();
+  }
+
+  /// One startup-sync attempt: fetch the remote blob, start the live
+  /// subscription, then reconcile dirty/seed state. Either step can lose a
+  /// transient race on cold start (the relay rate-limits the burst of
+  /// per-channel subscriptions and rejects with `rate-limited: quota
+  /// exceeded`) — retry with backoff instead of silently giving up.
+  Future<void> _syncWithRelay() async {
+    final foundRemote = _startupFetchSucceeded ? true : await _fetchAndMerge();
+    if (foundRemote != null) _startupFetchSucceeded = true;
+
+    final subscribed = _unsubscribe != null || await _startLiveSubscription();
 
     // Publish-on-reconnect for unpublished local edits, and seed-publish when
     // the relay confirmed it has no blob but local prefs exist. `foundRemote`
@@ -98,12 +119,40 @@ class ChannelSortManager {
     if (_dirtySince > 0 || (foundRemote == false && _store.groups.isNotEmpty)) {
       markDirty();
     }
-    _onChanged();
+
+    if (!_startupFetchSucceeded || !subscribed) {
+      _scheduleStartupRetry();
+    }
+  }
+
+  void _scheduleStartupRetry() {
+    if (_disposed) return;
+    _startupRetryTimer?.cancel();
+    final delayMs = min(
+      _startupRetryBaseDelay.inMilliseconds << min(_startupRetryAttempt, 5),
+      30000,
+    );
+    _startupRetryAttempt++;
+    debugPrint(
+      '[ChannelSortManager] startup sync incomplete; '
+      'retrying in ${delayMs}ms (attempt $_startupRetryAttempt)',
+    );
+    _startupRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      _startupRetryTimer = null;
+      unawaited(
+        _syncWithRelay().then((_) {
+          if (!_disposed) _onChanged();
+        }),
+      );
+    });
   }
 
   void dispose({bool flushPending = true}) {
     if (_disposed) return;
     _disposed = true;
+
+    _startupRetryTimer?.cancel();
+    _startupRetryTimer = null;
 
     final hadPending = _publishDebounce != null;
     _publishDebounce?.cancel();
@@ -177,14 +226,16 @@ class ChannelSortManager {
       return events.any(
         (e) => e.pubkey == pubkey && e.getTagValue('d') == 'channel-sort',
       );
-    } catch (_) {
+    } catch (error) {
+      debugPrint('[ChannelSortManager] fetch failed: $error');
       // Local state remains usable when relay is unavailable.
       return null;
     }
   }
 
-  Future<void> _startLiveSubscription() async {
-    if (_relaySession == null) return;
+  /// Returns whether the live subscription was established.
+  Future<bool> _startLiveSubscription() async {
+    if (_relaySession == null) return false;
     try {
       _unsubscribe = await _relaySession.subscribe(
         NostrFilter(
@@ -197,8 +248,12 @@ class ChannelSortManager {
         ),
         _handleIncomingEvent,
       );
-    } catch (_) {
-      // Non-fatal — local state and history still work.
+      return true;
+    } catch (error) {
+      debugPrint('[ChannelSortManager] live subscription failed: $error');
+      // Non-fatal — local state and history still work; retried by the
+      // startup-sync backoff.
+      return false;
     }
   }
 

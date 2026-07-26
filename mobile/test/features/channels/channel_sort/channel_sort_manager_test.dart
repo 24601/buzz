@@ -149,6 +149,50 @@ void main() {
     expect(manager.store.groups.keys, ['channels']);
     manager.dispose(flushPending: false);
   });
+
+  test('startup fetch rejected by relay rate limit retries until the remote '
+      'blob is adopted (cold-start regression)', () async {
+    await setUpEnv();
+    final relay = _RateLimitedRelaySession(
+      failuresBeforeSuccess: 2,
+      historyEvents: [
+        sortEvent(groups: {'channels': 'recent'}, createdAt: 100),
+      ],
+    );
+
+    final manager = ChannelSortManager(
+      pubkey: keychain.public,
+      prefs: prefs,
+      crypto: crypto,
+      relaySession: relay,
+      signedEventRelay: _RecordingSignedEventRelay(),
+      remoteEnabled: true,
+      onChanged: () {},
+      startupRetryBaseDelay: const Duration(milliseconds: 10),
+    );
+    await manager.initialize();
+
+    expect(manager.sortModeFor('channels'), ChannelSortMode.alpha);
+
+    await _waitUntil(
+      () => manager.sortModeFor('channels') == ChannelSortMode.recent,
+    );
+    expect(relay.subscribeCalls, greaterThan(1));
+    manager.dispose(flushPending: false);
+  });
+}
+
+Future<void> _waitUntil(
+  bool Function() condition, {
+  Duration timeout = const Duration(seconds: 2),
+}) async {
+  final deadline = DateTime.now().add(timeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('condition not met within $timeout');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
 }
 
 class _SubmittedEvent {
@@ -210,4 +254,47 @@ class _FakeRelaySession extends RelaySessionNotifier {
     void Function(NostrEvent) onEvent, {
     void Function(String message)? onClosed,
   }) async => () {};
+}
+
+/// Rejects the first [failuresBeforeSuccess] fetch and subscribe calls with
+/// the relay's rate-limit error, then succeeds — the Android cold-start
+/// failure mode where the channel-list REQ burst exhausts the relay's
+/// per-connection quota before the sort manager gets a turn.
+class _RateLimitedRelaySession extends RelaySessionNotifier {
+  _RateLimitedRelaySession({
+    required this.failuresBeforeSuccess,
+    this.historyEvents = const [],
+  });
+
+  final int failuresBeforeSuccess;
+  final List<NostrEvent> historyEvents;
+  int fetchCalls = 0;
+  int subscribeCalls = 0;
+  final List<void Function(NostrEvent)> _listeners = [];
+
+  @override
+  Future<List<NostrEvent>> fetchHistory(
+    NostrFilter filter, {
+    Duration timeout = const Duration(seconds: 8),
+  }) async {
+    fetchCalls++;
+    if (fetchCalls <= failuresBeforeSuccess) {
+      throw Exception('rate-limited: quota exceeded; retry in 2s');
+    }
+    return historyEvents;
+  }
+
+  @override
+  Future<void Function()> subscribe(
+    NostrFilter filter,
+    void Function(NostrEvent) onEvent, {
+    void Function(String message)? onClosed,
+  }) async {
+    subscribeCalls++;
+    if (subscribeCalls <= failuresBeforeSuccess) {
+      throw Exception('rate-limited: quota exceeded; retry in 1s');
+    }
+    _listeners.add(onEvent);
+    return () => _listeners.remove(onEvent);
+  }
 }
