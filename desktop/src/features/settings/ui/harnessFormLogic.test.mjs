@@ -287,5 +287,5 @@ test("commaArgError_commaInArg_namesOffender", () => {
 
 test("commaArgError_firstOffenderReported", () => {
   const err = commaArgError(["x,y", "p,q"]);
-  assert.ok(err !== null && err.includes('"x,y"'));
+  assert.ok(err?.includes('"x,y"'));
 });

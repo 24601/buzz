@@ -80,7 +80,10 @@ const overrides = new Map([
   // ratcheting 1443 -> 1295. Queued to split further in the A2 fold.
   // global-agent-config: resolve_deploy_model_provider + visibility exports
   // add ~40 lines on top of the 1A.1 ratchet. Queued to split.
-  ["src-tauri/src/commands/agents.rs", 1340],
+  // +47: review fix for #2773 — load_global_agent_config hoisted out of
+  // build_managed_agent_summary into callers, dangling-harness summaries render
+  // the deleted id, and spawn errors surface as sentences (tests included).
+  ["src-tauri/src/commands/agents.rs", 1387],
   // agent-lifecycle-fixes: cascade-delete in delete_persona restructured into
   // 3-phase (stage/stop/commit) + commit_cascade_agents injectable helper for
   // retry-safety. Load-bearing reviewer-required change; queued to split.
@@ -253,7 +256,9 @@ const overrides = new Map([
   // Load-bearing correctness fix. Queued to split.
   // +2: AcpRuntimeCatalogEntry.requiresExternalCli field added by main
   // (#2680) to indicate runtimes that need a separate CLI install.
-  ["src/shared/api/types.ts", 1051],
+  // +6: ManagedAgent.runtime record-level pin + JSDoc so the harness delete
+  // confirmation can count referencing agents (review fix for #2773).
+  ["src/shared/api/types.ts", 1057],
   // readiness-gate: PersonaDialog.tsx threads computeLocalModeGate +
   // requiredCredentialEnvKeys + RequiredFieldLabel so the "New agent" dialog
   // shows required markers and credential amber rows (parity with
@@ -340,7 +345,10 @@ const overrides = new Map([
   // +17: merge of main (#2767) — codex_adapter_is_outdated_with_path split out
   // so Codex adapter planning takes an explicit PATH. Auto-merged cleanly; only
   // the ceiling needed composing with the BYOH growth above.
-  ["src-tauri/src/managed_agents/discovery.rs", 1732],
+  // +13: review fix for #2773 — discovery publishes the registry by re-reading
+  // the harness dir under persist_mutex (publish_harness_registry_from_dir call
+  // + doc comment), closing the stale-snapshot clobber race.
+  ["src-tauri/src/managed_agents/discovery.rs", 1745],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -348,7 +356,11 @@ const overrides = new Map([
   // B-3 env validation boundary tests (malformed key, reserved shape, NUL,
   // size limit, ownership marker). Load-bearing correctness/security coverage;
   // queued to extract helper module once the feature stabilizes.
-  ["src-tauri/src/managed_agents/custom_harnesses.rs", 1045],
+  // +153: review fix for #2773 — collision/dup filtering moved into
+  // load_custom_harnesses so warm + discovery inherit identical shadowing
+  // rules, publish_harness_registry_from_dir (mutex-scoped publish seam), and
+  // comma-in-args validation at validate_harness_definition, with tests.
+  ["src-tauri/src/managed_agents/custom_harnesses.rs", 1198],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -363,7 +375,10 @@ const overrides = new Map([
   // immediate save+start, edit with rename) added to discovery/tests.rs.
   // +64: BYOH pass-2 I2 env round-trip — 2 discriminating tests proving custom
   // catalog entries carry definition_env and builtins do not.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1576],
+  // +90: review fix for #2773 — deterministic interleaving regressions for the
+  // discovery publish race (save-during-discovery survives publish;
+  // delete-during-discovery stays gone).
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1666],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
