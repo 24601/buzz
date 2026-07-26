@@ -36,12 +36,13 @@ pub async fn cmd_open_pr(
     to: &[String],
     channel: Option<&str>,
     source_message: Option<&str>,
+    thread_root: Option<&str>,
     revision_of: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_optional_body(body, body_file)?;
-    let context = parse_git_conversation_context(channel, source_message)?;
+    let context = parse_git_conversation_context(channel, source_message, thread_root)?;
 
     let repo = GitRepoCoord {
         owner: repo_owner.to_string(),
@@ -243,6 +244,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
             to,
             channel,
             source_message,
+            thread_root,
             revision_of,
         } => {
             cmd_open_pr(
@@ -261,6 +263,7 @@ pub async fn dispatch(cmd: crate::PrCmd, client: &BuzzClient) -> Result<(), CliE
                 &to,
                 channel.as_deref(),
                 source_message.as_deref(),
+                thread_root.as_deref(),
                 revision_of.as_deref(),
             )
             .await

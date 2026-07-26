@@ -49,8 +49,10 @@ When a Buzz message triggers `repos create`, `issues create`, `pr open`, or
 `patches send`, always pass `--channel <current-channel-uuid>` from `[Context]`
 and `--source-message <triggering-event-id>` from `[Event]`. The CLI records
 the exact source backlink and replies with a clickable Git activity card. Do
-not ask for values already present in the event context. `pr open --channel`
-still works without `--source-message` when only an origin `h` tag is needed.
+not ask for values already present in the event context. When `[Context]` has
+`Scope: thread`, also pass its `Thread root` as `--thread-root <event-id>` so
+the card appears in the current thread. `pr open --channel` still works without
+`--source-message` when only an origin `h` tag is needed.
 
 Manage your repository's enforced branch and tag rules with `repos protect list|set|remove`. Ref patterns must use full Git names such as `refs/heads/main` or `refs/tags/*`; supported rules are `--push owner|admin|member`, `--no-force-push`, `--no-delete`, and `--require-patch`. `protect set` replaces the complete rule for that exact pattern, so omitted constraints are removed. Protection updates preserve every unrelated metadata tag and return exit code 5 when a newer NIP-33 head wins a concurrent write.
 

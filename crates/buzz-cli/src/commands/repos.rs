@@ -212,9 +212,10 @@ pub async fn cmd_create_repo(
     relays: &[String],
     channel: Option<&str>,
     source_message: Option<&str>,
+    thread_root: Option<&str>,
 ) -> Result<(), CliError> {
     validate_repo_id(repo_id)?;
-    let context = parse_git_conversation_context(channel, source_message)?;
+    let context = parse_git_conversation_context(channel, source_message, thread_root)?;
 
     let clone_refs: Vec<&str> = clone_urls.iter().map(|s| s.as_str()).collect();
     let relay_refs: Vec<&str> = relays.iter().map(|s| s.as_str()).collect();
@@ -378,6 +379,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
             relays,
             channel,
             source_message,
+            thread_root,
         } => {
             cmd_create_repo(
                 client,
@@ -389,6 +391,7 @@ pub async fn dispatch(cmd: crate::ReposCmd, client: &BuzzClient) -> Result<(), C
                 &relays,
                 channel.as_deref(),
                 source_message.as_deref(),
+                thread_root.as_deref(),
             )
             .await
         }

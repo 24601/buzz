@@ -16,11 +16,12 @@ pub async fn cmd_create_issue(
     to: &[String],
     channel: Option<&str>,
     source_message: Option<&str>,
+    thread_root: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let body = read_or_stdin(content)?;
-    let context = parse_git_conversation_context(channel, source_message)?;
+    let context = parse_git_conversation_context(channel, source_message, thread_root)?;
 
     let meta = GitIssueMeta {
         labels: labels.to_vec(),
@@ -170,6 +171,7 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
             to,
             channel,
             source_message,
+            thread_root,
         } => {
             cmd_create_issue(
                 client,
@@ -181,6 +183,7 @@ pub async fn dispatch(cmd: crate::IssuesCmd, client: &BuzzClient) -> Result<(), 
                 &to,
                 channel.as_deref(),
                 source_message.as_deref(),
+                thread_root.as_deref(),
             )
             .await
         }

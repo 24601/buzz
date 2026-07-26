@@ -25,11 +25,12 @@ pub async fn cmd_send_patch(
     committer: Option<&str>,
     channel: Option<&str>,
     source_message: Option<&str>,
+    thread_root: Option<&str>,
 ) -> Result<(), CliError> {
     validate_hex64(repo_owner)?;
     validate_repo_id(repo_id)?;
     let content = read_file_or_stdin(patch)?;
-    let context = parse_git_conversation_context(channel, source_message)?;
+    let context = parse_git_conversation_context(channel, source_message, thread_root)?;
 
     let committer = match committer {
         Some(spec) => Some(parse_committer(spec)?),
@@ -244,6 +245,7 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
             committer,
             channel,
             source_message,
+            thread_root,
         } => {
             cmd_send_patch(
                 client,
@@ -261,6 +263,7 @@ pub async fn dispatch(cmd: crate::PatchesCmd, client: &BuzzClient) -> Result<(),
                 committer.as_deref(),
                 channel.as_deref(),
                 source_message.as_deref(),
+                thread_root.as_deref(),
             )
             .await
         }

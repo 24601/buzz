@@ -1119,6 +1119,9 @@ pub enum ReposCmd {
         /// Triggering Buzz message event ID; requires --channel
         #[arg(long, requires = "channel")]
         source_message: Option<String>,
+        /// Original thread root when the triggering message is already a reply
+        #[arg(long, requires = "source_message")]
+        thread_root: Option<String>,
     },
     /// Get a repository announcement
     Get {
@@ -1244,6 +1247,9 @@ pub enum PatchesCmd {
         /// Triggering Buzz message event ID; requires --channel
         #[arg(long, requires = "channel")]
         source_message: Option<String>,
+        /// Original thread root when the triggering message is already a reply
+        #[arg(long, requires = "source_message")]
+        thread_root: Option<String>,
     },
     /// Get a patch by event id
     Get {
@@ -1356,6 +1362,9 @@ pub enum PrCmd {
         /// Triggering Buzz message event ID; requires --channel
         #[arg(long, requires = "channel")]
         source_message: Option<String>,
+        /// Original thread root when the triggering message is already a reply
+        #[arg(long, requires = "source_message")]
+        thread_root: Option<String>,
         /// Root patch event id this PR revises
         #[arg(long)]
         revision_of: Option<String>,
@@ -1482,6 +1491,9 @@ pub enum IssuesCmd {
         /// Triggering Buzz message event ID; requires --channel
         #[arg(long, requires = "channel")]
         source_message: Option<String>,
+        /// Original thread root when the triggering message is already a reply
+        #[arg(long, requires = "source_message")]
+        thread_root: Option<String>,
     },
     /// Get an issue by event id
     Get {
@@ -1892,6 +1904,22 @@ mod tests {
                 .expect("--channel must be required");
             assert!(error.to_string().contains("--channel"));
         }
+    }
+
+    #[test]
+    fn git_thread_root_requires_source_message() {
+        let error = Cli::try_parse_from([
+            "buzz",
+            "repos",
+            "create",
+            "--id",
+            "repo",
+            "--thread-root",
+            &"a".repeat(64),
+        ])
+        .err()
+        .expect("--source-message must be required");
+        assert!(error.to_string().contains("--source-message"));
     }
 
     #[test]

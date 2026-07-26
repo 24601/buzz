@@ -17,6 +17,7 @@ pub(crate) struct GitConversationContext {
 struct ActivityContext {
     channel_id: Uuid,
     source_message: EventId,
+    thread_root: EventId,
 }
 
 #[derive(Clone, Copy)]
@@ -41,15 +42,22 @@ impl GitEntityType {
 pub(crate) fn parse_git_conversation_context(
     channel: Option<&str>,
     source_message: Option<&str>,
+    thread_root: Option<&str>,
 ) -> Result<GitConversationContext, CliError> {
     if source_message.is_some() && channel.is_none() {
         return Err(CliError::Usage(
             "--source-message requires --channel".into(),
         ));
     }
+    if thread_root.is_some() && source_message.is_none() {
+        return Err(CliError::Usage(
+            "--thread-root requires --source-message".into(),
+        ));
+    }
 
     let channel_id = channel.map(parse_uuid).transpose()?;
     let source_event = source_message.map(parse_event_id).transpose()?;
+    let thread_root = thread_root.map(parse_event_id).transpose()?;
     let source_message = match (channel_id, source_event) {
         (Some(channel_id), Some(source_message)) => Some(GitSourceMessage {
             channel_id: channel_id.to_string(),
@@ -61,6 +69,7 @@ pub(crate) fn parse_git_conversation_context(
         (Some(channel_id), Some(source_message)) => Some(ActivityContext {
             channel_id,
             source_message,
+            thread_root: thread_root.unwrap_or(source_message),
         }),
         _ => None,
     };
@@ -116,7 +125,7 @@ fn build_activity_message(
     git_url: &str,
 ) -> Result<EventBuilder, CliError> {
     let thread_ref = ThreadRef {
-        root_event_id: context.source_message,
+        root_event_id: context.thread_root,
         parent_event_id: context.source_message,
     };
     let content = format!("Created [{}]({git_url})", markdown_link_label(title.trim()));
@@ -252,11 +261,18 @@ mod tests {
 
     #[test]
     fn source_message_requires_channel_and_valid_values() {
-        assert!(parse_git_conversation_context(None, Some(&"a".repeat(64))).is_err());
-        assert!(parse_git_conversation_context(Some("not-a-uuid"), None).is_err());
+        assert!(parse_git_conversation_context(None, Some(&"a".repeat(64)), None).is_err());
+        assert!(parse_git_conversation_context(Some("not-a-uuid"), None, None).is_err());
         assert!(parse_git_conversation_context(
             Some("11111111-1111-4111-8111-111111111111"),
-            Some("not-an-event")
+            None,
+            Some(&"c".repeat(64)),
+        )
+        .is_err());
+        assert!(parse_git_conversation_context(
+            Some("11111111-1111-4111-8111-111111111111"),
+            Some("not-an-event"),
+            None,
         )
         .is_err());
     }
@@ -267,6 +283,7 @@ mod tests {
         let context = ActivityContext {
             channel_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("channel"),
             source_message: source,
+            thread_root: source,
         };
         let event = build_activity_message(
             &context,
@@ -290,5 +307,33 @@ mod tests {
             .tags
             .iter()
             .any(|tag| { tag.as_slice() == ["e", &"b".repeat(64), "", "reply"] }));
+    }
+
+    #[test]
+    fn activity_message_preserves_existing_thread_root() {
+        let source = parse_event_id(&"b".repeat(64)).expect("source event");
+        let root = parse_event_id(&"c".repeat(64)).expect("root event");
+        let context = ActivityContext {
+            channel_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").expect("channel"),
+            source_message: source,
+            thread_root: root,
+        };
+        let event = build_activity_message(
+            &context,
+            "Repository",
+            "buzz://git?repo=owner%3Arepo&type=repository",
+        )
+        .expect("activity builder")
+        .sign_with_keys(&Keys::generate())
+        .expect("signed activity");
+
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["e", &"c".repeat(64), "", "root"]));
+        assert!(event
+            .tags
+            .iter()
+            .any(|tag| tag.as_slice() == ["e", &"b".repeat(64), "", "reply"]));
     }
 }
