@@ -189,7 +189,12 @@ The Linux AppImage is post-processed by `desktop/scripts/fix-appimage.sh`,
 which strips infra libraries over-bundled by linuxdeploy (they crash on
 Mesa 25+ / GLib 2.88 distros; see
 [tauri-apps/tauri#15665](https://github.com/tauri-apps/tauri/issues/15665))
-and re-signs the artifact. As a result the AppImage relies on the
+and re-signs the artifact. The script also installs a launcher shim that
+repairs the environment linuxdeploy's `AppRun` sets up — it restores host
+GStreamer plugin discovery and defaults
+`WEBKIT_DISABLE_DMABUF_RENDERER=1`, whose renderer crashes on some Mesa
+drivers and buys nothing on the X11 backend the AppImage is pinned to.
+As a result the AppImage relies on the
 host's Wayland/GStreamer/graphics stack and requires GLib >= 2.72
 (Ubuntu 22.04 or newer). The `release-linux` job builds inside a
 `ubuntu:22.04` container for broad GLIBC compatibility.

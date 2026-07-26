@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# fix-appimage.sh — Remove infra libs from a Tauri-produced AppImage that crash
-# on Mesa 25+ / GLib 2.88 distros (Ubuntu 26.04, Fedora 42+, etc.).
+# fix-appimage.sh — Post-process a Tauri-produced AppImage so it runs on the
+# host graphics/media stack: remove infra libs that crash when they skew against
+# the host's (Mesa 25+ / GLib 2.88 distros such as Ubuntu 26.04 and Fedora 42+;
+# systemd >= 251 distros such as Arch and Fedora 41+) and repair the launch
+# environment linuxdeploy's AppRun leaves behind.
 #
 # Usage: fix-appimage.sh <path-to.AppImage>
 #
@@ -12,7 +15,8 @@
 # avoid appimagetool fetching one from its mutable `continuous` tag (CI pins
 # this; unset is fine for local testing).
 #
-# Root cause — three interlocking failures (upstream: https://github.com/tauri-apps/tauri/issues/15665):
+# Root cause — five distinct failures the bundle exhibits (1-3 upstream:
+# https://github.com/tauri-apps/tauri/issues/15665):
 #
 #  1. EGL crash: linuxdeploy bundles libwayland-client.so.0 (1.22) alongside
 #     the app. Mesa 25's libEGL calls the bundled version at runtime; the version
@@ -42,17 +46,44 @@
 #     wrong -- spawning nothing, dying on unresolved bundled libs, or spawning
 #     the system helpers -- and the window never appears.
 #
+#  4. libsystemd version-tag skew (https://github.com/block/buzz/issues/2335):
+#     unlike 1-3 this one is self-inflicted by the removals above. Once bundled
+#     libmount.so* is gone the *host* libmount.so.1 loads, and on systemd >= 251
+#     hosts it requires the LIBSYSTEMD_251 version tag. The bundled
+#     libsystemd.so.0 (built on our ubuntu:22.04 release container, so tagged up
+#     to LIBSYSTEMD_249) does not export it, and because the AppImage puts
+#     bundle usr/lib first on LD_LIBRARY_PATH the host libmount resolves against
+#     the bundled copy -- the dynamic linker aborts before main() on Arch,
+#     Fedora 41+, CachyOS. Removing the bundled copy is the same "defer to the
+#     host's newer, ABI-compatible library" move as 1-2, and safe in the same
+#     way: nothing in a bundle built on 22.04 can ask for more than
+#     LIBSYSTEMD_249, which every host in our support matrix provides.
+#
+#  5. WebKit dmabuf renderer crash (https://github.com/block/buzz/issues/2338):
+#     WebKitGTK's dmabuf render path core-dumps on some Mesa drivers under
+#     rootless XWayland (reported on an Intel iGPU with Mesa 26.1 under KDE
+#     Plasma Wayland -- the process prints its startup lines, then dumps core
+#     before any window appears). linuxdeploy's GTK apprun-hook hardcodes
+#     GDK_BACKEND=x11 because the Wayland backend dies in eglMakeCurrent
+#     (https://github.com/tauri-apps/tauri/issues/8541), and the dmabuf renderer
+#     exists for Wayland zero-copy page flips -- so on the only backend this
+#     AppImage can use it buys nothing and contributes only a crash surface.
+#     Hence AppImage-scoped and unconditional here, rather than set in Rust or
+#     tauri.conf.json: the .deb runs on native Wayland where dmabuf does work,
+#     and disabling it there would be a rendering regression.
+#
 # Fix: (a) remove the offending libs so the app uses the system copies (newer and
 # ABI-compatible on any distro shipping glib >= 2.72 / Ubuntu 22.04+), and
-# (b) install a launcher shim in front of the app binary that strips the
-# bundle-pointing GST_PLUGIN_* overrides AppRun.wrapped injects, letting the host
-# GStreamer resolve plugins via its own default path (correct on Debian, Arch, and
-# Fedora alike). The shim has to run *after* AppRun.wrapped: the wrapper rewrites
-# the variable last -- after every apprun-hook -- so any value set before it is
-# discarded (verified empirically; a runtime GST_PLUGIN_SYSTEM_PATH_1_0 passed
-# into the AppImage does not survive). No tauri.conf.json knob can do this --
-# bundle.linux.appimage only exposes bundleMediaFramework, files (copy-only, no
-# remove/symlink), and bundleXdgOpen.
+# (b) install a launcher shim in front of the app binary that repairs the launch
+# environment: it strips the bundle-pointing GST_PLUGIN_* overrides
+# AppRun.wrapped injects, letting the host GStreamer resolve plugins via its own
+# default path (correct on Debian, Arch, and Fedora alike), and defaults
+# WEBKIT_DISABLE_DMABUF_RENDERER=1. The shim has to run *after* AppRun.wrapped:
+# the wrapper rewrites GST_PLUGIN_SYSTEM_PATH_1_0 last -- after every
+# apprun-hook -- so any value set before it is discarded (verified empirically; a
+# runtime GST_PLUGIN_SYSTEM_PATH_1_0 passed into the AppImage does not survive).
+# No tauri.conf.json knob can do this -- bundle.linux.appimage only exposes
+# bundleMediaFramework, files (copy-only, no remove/symlink), and bundleXdgOpen.
 
 set -euo pipefail
 
@@ -110,16 +141,24 @@ rm -f \
   "$LIBDIR"/libelf.so* \
   "$LIBDIR"/libffi.so*
 
-echo "==> Installing GStreamer launcher shim on the app binary"
-# AppRun.wrapped force-sets GST_PLUGIN_SYSTEM_PATH_1_0 (and the 0.10-era
-# GST_PLUGIN_SYSTEM_PATH) to $APPDIR/usr/lib/gstreamer-1.0 — a dir we bundle no
-# plugins into. Because a set path *replaces* GStreamer's default instead of
-# extending it, the app finds zero plugins on any distro and WebKit aborts. The
-# wrapper rewrites the variable after every apprun-hook, so the only place to undo
-# it is a shim between AppRun.wrapped and the real binary. First confirm the
-# wrapper still injects the override; if a tauri/linuxdeploy bump drops it, the
-# shim becomes a harmless no-op, but we want a human to re-verify rather than
-# silently ship — so fail loudly (mirrors the libwayland guard above).
+echo "==> Installing launcher-env shim on the app binary"
+# Two launch-environment defects have to be fixed after AppRun.wrapped runs, so
+# both live in one shim between the wrapper and the real binary:
+#
+#  * AppRun.wrapped force-sets GST_PLUGIN_SYSTEM_PATH_1_0 (and the 0.10-era
+#    GST_PLUGIN_SYSTEM_PATH) to $APPDIR/usr/lib/gstreamer-1.0 — a dir we bundle no
+#    plugins into. Because a set path *replaces* GStreamer's default instead of
+#    extending it, the app finds zero plugins on any distro and WebKit aborts. The
+#    wrapper rewrites the variable after every apprun-hook, so a shim is the only
+#    place left to undo it.
+#  * WebKitGTK's dmabuf renderer core-dumps on some Mesa drivers under the
+#    XWayland path this AppImage is pinned to (root cause 5 above); the shim
+#    defaults WEBKIT_DISABLE_DMABUF_RENDERER=1.
+#
+# First confirm the wrapper still injects the GStreamer override; if a
+# tauri/linuxdeploy bump drops it, that half of the shim becomes a harmless
+# no-op, but we want a human to re-verify rather than silently ship — so fail
+# loudly (mirrors the libwayland guard above).
 APPRUN_WRAPPED="$WORKDIR/squashfs-root/AppRun.wrapped"
 if ! grep -aq "GST_PLUGIN_SYSTEM_PATH_1_0" "$APPRUN_WRAPPED"; then
   echo "Error: AppRun.wrapped is missing or no longer references GST_PLUGIN_SYSTEM_PATH_1_0 — GStreamer path injection changed; re-verify fix-appimage.sh" >&2
@@ -140,15 +179,16 @@ fi
 mv "$APP_BIN" "$APP_BIN.bin"
 cat > "$APP_BIN" <<'SHIM'
 #!/usr/bin/env bash
-# GStreamer shim installed by desktop/scripts/fix-appimage.sh.
+# Launcher-env shim installed by desktop/scripts/fix-appimage.sh.
 #
-# linuxdeploy's AppRun.wrapped force-sets GST_PLUGIN_SYSTEM_PATH_1_0 to an empty
-# in-bundle dir ($APPDIR/usr/lib/gstreamer-1.0). A set path *replaces* the host's
-# default GStreamer search path, so the app finds zero plugins and WebKit aborts
-# (blank window). Drop the bundle-pointing GST_PLUGIN_* overrides so the system
-# GStreamer — which we use, having removed the bundled core libs — resolves
-# plugins via its own default path on any distro. Values that don't point into
-# this AppImage are the user's own and are preserved.
+# GStreamer: linuxdeploy's AppRun.wrapped force-sets GST_PLUGIN_SYSTEM_PATH_1_0
+# to an empty in-bundle dir ($APPDIR/usr/lib/gstreamer-1.0). A set path
+# *replaces* the host's default GStreamer search path, so the app finds zero
+# plugins and WebKit aborts (blank window). Drop the bundle-pointing
+# GST_PLUGIN_* overrides so the system GStreamer — which we use, having removed
+# the bundled core libs — resolves plugins via its own default path on any
+# distro. Values that don't point into this AppImage are the user's own and are
+# preserved.
 here="$(dirname "$(readlink -f "$0")")"
 appdir="$(readlink -f "$here/../..")"
 for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
@@ -159,6 +199,13 @@ for var in GST_PLUGIN_SYSTEM_PATH_1_0 GST_PLUGIN_SYSTEM_PATH \
     unset "$var"
   fi
 done
+
+# WebKit dmabuf renderer: core-dumps on some Mesa drivers under rootless
+# XWayland (block/buzz#2338). The GTK apprun-hook pins GDK_BACKEND=x11
+# (tauri-apps/tauri#8541), and dmabuf only buys zero-copy on native Wayland, so
+# it is pure crash surface here. `:-` keeps an explicit user value, including 0.
+export WEBKIT_DISABLE_DMABUF_RENDERER="${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+
 exec -a "buzz-desktop" "$here/buzz-desktop.bin" "$@"
 SHIM
 chmod +x "$APP_BIN"
