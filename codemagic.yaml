@@ -90,3 +90,62 @@ workflows:
       - artifacts/*.mp4
       - artifacts/*.png
       - artifacts/*.log
+
+  # Real end-to-end: the app (authenticated via seeded storage) connects to a
+  # live relay and sends a message. Relay config + identity + target channel are
+  # passed as environment variables (set them on the build trigger). The relay
+  # must be reachable from the Codemagic Mac (e.g. a tunnel to a dev relay).
+  ios-send-message-e2e:
+    name: iOS send-message E2E (real relay)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: 3.41.7
+      xcode: latest
+      cocoapods: default
+    scripts:
+      - name: Flutter pub get
+        script: cd "$CM_BUILD_DIR/mobile" && flutter pub get
+      - name: Boot simulator, record, run send-message integration test
+        script: |
+          set -u
+          cd "$CM_BUILD_DIR/mobile"
+          ART="$CM_BUILD_DIR/artifacts"; mkdir -p "$ART"
+
+          DEVICE=$(xcrun simctl list devices available \
+            | grep -iE 'iPhone' \
+            | grep -oiE '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' \
+            | head -n1)
+          echo "DEVICE=[$DEVICE]"
+          if [ -z "$DEVICE" ]; then echo "No iPhone simulator available"; exit 1; fi
+          xcrun simctl boot "$DEVICE" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE" || true
+
+          # Record the whole test run.
+          xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$ART/ios_send_message.mp4" &
+          REC_PID=$!
+          sleep 2
+
+          set +e
+          flutter test integration_test/send_message_test.dart -d "$DEVICE" \
+            --dart-define=E2E_RELAY_URL="${E2E_RELAY_URL:-}" \
+            --dart-define=E2E_NSEC="${E2E_NSEC:-}" \
+            --dart-define=E2E_PUBKEY="${E2E_PUBKEY:-}" \
+            --dart-define=E2E_CHANNEL_ID="${E2E_CHANNEL_ID:-}" \
+            --dart-define=E2E_CHANNEL_NAME="${E2E_CHANNEL_NAME:-mobile-e2e}" \
+            --dart-define=E2E_CONTENT="${E2E_CONTENT:-Hello from the iOS Simulator via a real relay}" \
+            2>&1 | tee "$ART/integration-test.log"
+          TEST_RC=${PIPESTATUS[0]}
+          set -e
+
+          xcrun simctl io "$DEVICE" screenshot "$ART/send_message_final.png" || true
+          sleep 2
+          kill -INT "$REC_PID" 2>/dev/null || true
+          wait "$REC_PID" 2>/dev/null || true
+          echo "== artifacts =="; ls -la "$ART" || true
+          echo "integration test rc=$TEST_RC"
+          exit "$TEST_RC"
+    artifacts:
+      - artifacts/*.mp4
+      - artifacts/*.png
+      - artifacts/*.log
