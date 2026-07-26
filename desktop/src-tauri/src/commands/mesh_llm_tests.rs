@@ -231,6 +231,35 @@ fn share_stop_tears_down_serve_but_not_client() {
 }
 
 #[test]
+fn share_start_restarts_to_replace_only_client_runtimes() {
+    assert_eq!(
+        mesh_start_plan(mesh_llm::MeshNodeMode::Serve, None),
+        MeshStartPlan::Start
+    );
+    assert_eq!(
+        mesh_start_plan(
+            mesh_llm::MeshNodeMode::Serve,
+            Some(mesh_llm::MeshNodeMode::Client),
+        ),
+        MeshStartPlan::RestartToReplaceClient
+    );
+    assert_eq!(
+        mesh_start_plan(
+            mesh_llm::MeshNodeMode::Serve,
+            Some(mesh_llm::MeshNodeMode::Serve),
+        ),
+        MeshStartPlan::RejectOccupied
+    );
+    assert_eq!(
+        mesh_start_plan(
+            mesh_llm::MeshNodeMode::Client,
+            Some(mesh_llm::MeshNodeMode::Client),
+        ),
+        MeshStartPlan::RejectOccupied
+    );
+}
+
+#[test]
 fn client_status_serializes_with_running_state_and_client_mode() {
     // Contract pin for the TS mock (e2eBridge.ts) and the frontend
     // predicate: a consuming node serializes as

@@ -58,6 +58,71 @@ fn share_stop_should_teardown(mode: mesh_llm::MeshNodeMode) -> bool {
     matches!(mode, mesh_llm::MeshNodeMode::Serve)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MeshStartPlan {
+    Start,
+    RestartToReplaceClient,
+    RejectOccupied,
+}
+
+fn mesh_start_plan(
+    requested_mode: mesh_llm::MeshNodeMode,
+    existing_mode: Option<mesh_llm::MeshNodeMode>,
+) -> MeshStartPlan {
+    match (requested_mode, existing_mode) {
+        (_, None) => MeshStartPlan::Start,
+        (mesh_llm::MeshNodeMode::Serve, Some(mesh_llm::MeshNodeMode::Client)) => {
+            MeshStartPlan::RestartToReplaceClient
+        }
+        _ => MeshStartPlan::RejectOccupied,
+    }
+}
+
+fn sharing_config_from_request(
+    request: &mesh_llm::StartMeshNodeRequest,
+) -> CmdResult<MeshSharingConfig> {
+    let model_id = request
+        .model_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|model_id| !model_id.is_empty())
+        .ok_or_else(|| "modelId is required for serve mode".to_string())?;
+    Ok(MeshSharingConfig {
+        enabled: true,
+        model_id: model_id.to_string(),
+        max_vram_gb: request.max_vram_gb,
+    })
+}
+
+fn restarting_share_status(config: &MeshSharingConfig) -> mesh_llm::MeshNodeStatus {
+    mesh_llm::MeshNodeStatus {
+        state: mesh_llm::MeshNodeState::Starting,
+        mode: Some(mesh_llm::MeshNodeMode::Serve),
+        health: mesh_llm::MeshHealth {
+            status: mesh_llm::MeshHealthStatus::Degraded,
+            reason: Some("Buzz is restarting to switch this machine to sharing".to_string()),
+        },
+        api_base_url: None,
+        console_url: None,
+        model_id: Some(config.model_id.clone()),
+        model_name: Some(config.model_id.clone()),
+        invite_token: None,
+        endpoint_id: None,
+        device_id: None,
+        device_name: None,
+    }
+}
+
+fn restart_to_share(
+    app: &AppHandle,
+    config: &MeshSharingConfig,
+) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    save_mesh_sharing_config(app, config)?;
+    let status = restarting_share_status(config);
+    app.request_restart();
+    Ok(status)
+}
+
 pub type CmdResult<T> = Result<T, String>;
 
 fn buzz_mesh_name_for_relay(relay_url: &str) -> String {
@@ -263,6 +328,37 @@ pub async fn mesh_start_node(
     state: State<'_, AppState>,
     mut request: mesh_llm::StartMeshNodeRequest,
 ) -> CmdResult<mesh_llm::MeshNodeStatus> {
+    let sharing_config = if request.mode == mesh_llm::MeshNodeMode::Serve {
+        Some(sharing_config_from_request(&request)?)
+    } else {
+        None
+    };
+
+    // Never replace a client runtime in-process. Even a Ready SDK handle can
+    // finish `stop()` while its native listeners are still releasing :9337
+    // and :3131; a pending client has no shutdown handle at all. Persist the
+    // requested serving configuration and switch roles across a controlled
+    // process restart, the only boundary that proves both ports are clean.
+    {
+        let runtime = state.mesh_llm_runtime.lock().await;
+        if let Some(existing) = runtime.as_ref() {
+            let plan = mesh_start_plan(request.mode, Some(existing.mode()));
+            match plan {
+                MeshStartPlan::RestartToReplaceClient => {
+                    let config = sharing_config
+                        .as_ref()
+                        .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+                    drop(runtime);
+                    return restart_to_share(&app, config);
+                }
+                MeshStartPlan::RejectOccupied => {
+                    return Err("mesh node is already running".to_string());
+                }
+                MeshStartPlan::Start => {}
+            }
+        }
+    }
+
     // Frontend requests never carry a roster. Resolve it and the bootstrap
     // endpoint from one snapshot so UI startup does not repeat relay probes.
     if request.trusted_owner_ids.is_none() || request.join_token.is_none() {
@@ -274,31 +370,49 @@ pub async fn mesh_start_node(
     }
     request.mesh_name = Some(buzz_mesh_name(&state));
     let mut runtime = state.mesh_llm_runtime.lock().await;
-    if runtime.is_some() {
+
+    let plan = match runtime.as_ref() {
+        Some(existing) => mesh_start_plan(request.mode, Some(existing.mode())),
+        None => mesh_start_plan(request.mode, None),
+    };
+    if plan == MeshStartPlan::RestartToReplaceClient {
+        let config = sharing_config
+            .as_ref()
+            .ok_or_else(|| "serving configuration is unavailable".to_string())?;
+        drop(runtime);
+        return restart_to_share(&app, config);
+    }
+    if plan == MeshStartPlan::RejectOccupied {
         return Err("mesh node is already running".to_string());
     }
 
-    let saved_request = request.clone();
     let started = mesh_llm::DesktopMeshRuntime::start(request)
         .await
         .map_err(|error| format!("{error:#}"))?;
-    let status = started
-        .status()
-        .await
-        .map_err(|error| format!("mesh node started but status probe failed: {error:#}"))?;
+    let status = match started.status().await {
+        Ok(status) => status,
+        Err(error) => {
+            let cleanup = started.stop().await;
+            if let Err(cleanup_error) = &cleanup {
+                eprintln!(
+                    "buzz-mesh: started node status failed and cleanup was incomplete: {cleanup_error:#}"
+                );
+            }
+            // The handle was never installed into AppState, so shutdown cannot
+            // see it again. Restart even when stop reported success: the
+            // process boundary guarantees native :9337/:3131 listeners cannot
+            // linger behind an untracked runtime.
+            drop(runtime);
+            app.request_restart();
+            return Err(format!(
+                "mesh node started but status probe failed: {error:#}; Buzz is restarting to guarantee cleanup"
+            ));
+        }
+    };
     *runtime = Some(started);
     drop(runtime);
-    if saved_request.mode == mesh_llm::MeshNodeMode::Serve {
-        if let Some(model_id) = saved_request.model_id.as_deref() {
-            save_mesh_sharing_config(
-                &app,
-                &MeshSharingConfig {
-                    enabled: true,
-                    model_id: model_id.to_string(),
-                    max_vram_gb: saved_request.max_vram_gb,
-                },
-            )?;
-        }
+    if let Some(config) = sharing_config.as_ref() {
+        save_mesh_sharing_config(&app, config)?;
     }
     mesh_llm::publish_current_status_once(&app, "start").await;
     Ok(status)
