@@ -1301,6 +1301,8 @@ pub(crate) fn build_token_source(cfg: &Config) -> Result<Arc<dyn TokenSource>, A
 /// Extracted so tests can assert on the actual wire shape instead of a
 /// hand-rolled literal — summaries never carry `reasoning` or `provider`
 /// (see `apply_openrouter_mutations`, which the summary path never calls).
+/// It spells the token limit `max_tokens` directly for the same reason: the
+/// mutation that renames it is never applied here.
 fn openrouter_summary_body(
     effective_model: &str,
     system_prompt: &str,
@@ -1310,7 +1312,7 @@ fn openrouter_summary_body(
     json!({
         "model": effective_model,
         "stream": false,
-        "max_completion_tokens": max_output_tokens,
+        "max_tokens": max_output_tokens,
         "messages": [
             { "role": "system", "content": system_prompt },
             { "role": "user", "content": user_prompt },
@@ -1534,6 +1536,16 @@ fn apply_openrouter_mutations(
     if let Some(obj) = body.as_object_mut() {
         // Remove the OpenAI-style reasoning_effort that openai_body may have set
         obj.remove("reasoning_effort");
+
+        // OpenRouter's catalog advertises `max_tokens`, not OpenAI's
+        // `max_completion_tokens` — and `require_parameters: true` below makes the
+        // router reject every endpoint lacking a parameter we send. Sending the
+        // OpenAI spelling 404s "No endpoints found that can handle the requested
+        // parameters" on the ~80% of tools-capable models that only advertise
+        // `max_tokens`.
+        if let Some(max_tokens) = obj.remove("max_completion_tokens") {
+            obj.insert("max_tokens".into(), max_tokens);
+        }
 
         // A2/A3: Add OpenRouter reasoning object when effort is configured
         if let Some(e) = effort {
@@ -3337,6 +3349,14 @@ mod tests {
         );
         assert_eq!(body["provider"]["require_parameters"], true);
         assert!(!body["tools"].as_array().unwrap().is_empty());
+        assert_eq!(
+            body["max_tokens"], 1024,
+            "token limit must carry openai_body's value under OpenRouter's spelling"
+        );
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "the OpenAI spelling 404s under require_parameters"
+        );
     }
 
     #[test]
@@ -3400,6 +3420,16 @@ mod tests {
         );
     }
 
+    /// The rename moves an existing value; it never invents a token limit for a
+    /// body that did not carry one.
+    #[test]
+    fn openrouter_body_without_token_limit_gains_none() {
+        let mut body = json!({ "model": "vendor/model", "messages": [] });
+        apply_openrouter_mutations(&mut body, None, "vendor/model");
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("max_completion_tokens").is_none());
+    }
+
     #[test]
     fn openrouter_summary_carries_neither_reasoning_nor_provider() {
         let body = openrouter_summary_body(
@@ -3411,6 +3441,11 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-opus-4-7");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "text to summarize");
+        assert_eq!(body["max_tokens"], 1024);
+        assert!(
+            body.get("max_completion_tokens").is_none(),
+            "summary body must use OpenRouter's token-limit spelling"
+        );
         assert!(
             body.get("reasoning").is_none(),
             "summary body must not carry reasoning"
@@ -3419,6 +3454,23 @@ mod tests {
             body.get("provider").is_none(),
             "summary body must not carry provider"
         );
+    }
+
+    /// The token-limit rename belongs to `apply_openrouter_mutations`, not to
+    /// `openai_body` — which OpenAI and Databricks also use, and where
+    /// `max_completion_tokens` is the correct spelling.
+    #[test]
+    fn openai_body_keeps_max_completion_tokens_when_unmutated() {
+        let body = openai_body(
+            &cfg(Provider::OpenAi),
+            "system",
+            &[HistoryItem::User("hi".into())],
+            &[],
+            "model",
+            None,
+        );
+        assert_eq!(body["max_completion_tokens"], 1024);
+        assert!(body.get("max_tokens").is_none());
     }
 
     // ---- A5: error-inside-200 ----
