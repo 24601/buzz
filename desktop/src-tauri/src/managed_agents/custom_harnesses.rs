@@ -691,12 +691,46 @@ mod tests {
 
     #[test]
     fn load_applies_id_collision_check() {
-        // A custom file named "goose.json" with id "goose" must be rejected.
-        // The collision check is applied inside discover_acp_runtimes_from, not
-        // in load_custom_harnesses — the file loader only validates the struct.
-        // We test the check_id_collision fn directly here.
+        // A custom file whose id shadows a built-in ("goose") must be dropped
+        // BY THE LOADER — `load_custom_harnesses` is the enforcement boundary
+        // shared by both the warm path and discovery. This exercises the real
+        // loader against a real file, not just the helper predicate.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("goose.json"),
+            r#"{"id":"goose","label":"Not Goose","command":"goose","args":["--evil"]}"#,
+        )
+        .unwrap();
+        assert!(
+            load_custom_harnesses(dir.path()).is_empty(),
+            "loader must drop a file shadowing a builtin id"
+        );
         assert!(check_id_collision("goose").is_err());
         assert!(check_id_collision("custom-goose").is_ok());
+    }
+
+    #[test]
+    fn load_dedups_duplicate_ids_first_file_wins() {
+        // Two files carrying the same custom id: the loader must keep exactly
+        // one definition (directory-order first wins; the duplicate is dropped).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("a.json"),
+            r#"{"id":"custom-dup","label":"First","command":"first-cmd"}"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("b.json"),
+            r#"{"id":"custom-dup","label":"Second","command":"second-cmd"}"#,
+        )
+        .unwrap();
+        let loaded = load_custom_harnesses(dir.path());
+        assert_eq!(
+            loaded.len(),
+            1,
+            "loader must dedup duplicate ids within the directory"
+        );
+        assert_eq!(loaded[0].id, "custom-dup");
     }
 
     // ── Round-trip via save_custom_harness_to_dir (B-4) ─────────────────────

@@ -83,7 +83,7 @@ pub async fn get_agent_models(
         // Returns Err on dangling harness id, propagating it to the caller.
         let descriptor =
             crate::managed_agents::resolve_effective_harness_descriptor(record, &personas, &global)
-                .map_err(|e| format!("cannot discover models for {pubkey}: {e}"))?;
+                .map_err(|e| model_discovery_error(&pubkey, &e))?;
 
         let resolved_agent = resolve_command(&descriptor.command)
             .map(|p| p.display().to_string())
@@ -158,6 +158,18 @@ pub async fn get_agent_models(
         merged_env,
     )
     .await
+}
+
+/// Error copy for a failed harness resolution during model discovery.
+///
+/// Routes through `user_facing_harness_error` so a dangling harness id renders
+/// as a sentence, never as the raw `DANGLING_HARNESS_ID:` sentinel — the same
+/// contract spawn and summary rows honor.
+fn model_discovery_error(pubkey: &str, error: &str) -> String {
+    format!(
+        "cannot discover models for {pubkey}: {}",
+        crate::managed_agents::user_facing_harness_error(error)
+    )
 }
 
 #[derive(Debug, Deserialize)]

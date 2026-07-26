@@ -76,3 +76,62 @@ export function deleteHarnessConfirmMessage(
   const noun = referencingAgents === 1 ? "agent uses" : "agents use";
   return `${referencingAgents} ${noun} this harness and will stop launching. Delete ${label}?`;
 }
+
+/** Minimal query-state shape consumed by `deleteConfirmState` — matches the
+ * relevant subset of a TanStack `useQuery` result so the logic stays pure. */
+export type BlastRadiusQuery<T> = {
+  /** True during the initial fetch (no data yet). */
+  isPending: boolean;
+  isError: boolean;
+  data: T | undefined;
+};
+
+export type DeleteConfirmState = {
+  /** False while the blast radius is still unknown — the destructive button
+   * must be disabled so a quick click can't beat the warning. */
+  canConfirm: boolean;
+  message: string;
+};
+
+/**
+ * Drive the delete-confirmation UI from the two blast-radius queries.
+ *
+ * - While either query is initial-loading, confirmation is DISABLED and the
+ *   copy says so: the promised "N agents will stop launching" warning must
+ *   render before the destructive action is clickable.
+ * - On query failure, deletion stays possible (blocking cleanup on a failed
+ *   read would be worse) but the copy states the count is unknown — it never
+ *   silently claims zero dependents.
+ */
+export function deleteConfirmState(
+  harnessId: string,
+  label: string,
+  agents: BlastRadiusQuery<
+    ReadonlyArray<{ runtime: string | null; personaId: string | null }>
+  >,
+  personas: BlastRadiusQuery<
+    ReadonlyArray<{ id: string; runtime: string | null }>
+  >,
+): DeleteConfirmState {
+  if (agents.isPending || personas.isPending) {
+    return {
+      canConfirm: false,
+      message: "Checking which agents use this harness…",
+    };
+  }
+  if (agents.isError || personas.isError) {
+    return {
+      canConfirm: true,
+      message: `Couldn't check which agents use this harness — some agents may stop launching. Delete ${label}?`,
+    };
+  }
+  const count = countAgentsReferencingHarness(
+    harnessId,
+    agents.data ?? [],
+    personas.data ?? [],
+  );
+  return {
+    canConfirm: true,
+    message: deleteHarnessConfirmMessage(label, count),
+  };
+}

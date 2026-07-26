@@ -7,6 +7,7 @@ import {
   isEditableEntry,
   countAgentsReferencingHarness,
   deleteHarnessConfirmMessage,
+  deleteConfirmState,
 } from "./harnessGalleryLogic.ts";
 
 // ── Minimal catalog entry factory ────────────────────────────────────────────
@@ -244,5 +245,63 @@ describe("deleteHarnessConfirmMessage", () => {
       deleteHarnessConfirmMessage("My Harness", 3),
       "3 agents use this harness and will stop launching. Delete My Harness?",
     );
+  });
+});
+
+// ── deleteConfirmState ────────────────────────────────────────────────────────
+
+describe("deleteConfirmState", () => {
+  const settled = (data) => ({ isPending: false, isError: false, data });
+  const pending = { isPending: true, isError: false, data: undefined };
+  const failed = { isPending: false, isError: true, data: undefined };
+
+  it("disables confirm while agents query is still loading", () => {
+    const state = deleteConfirmState("h1", "My Harness", pending, settled([]));
+    assert.equal(state.canConfirm, false);
+    assert.match(state.message, /Checking which agents/);
+  });
+
+  it("disables confirm while personas query is still loading", () => {
+    const state = deleteConfirmState("h1", "My Harness", settled([]), pending);
+    assert.equal(state.canConfirm, false);
+    assert.match(state.message, /Checking which agents/);
+  });
+
+  it("query failure does not claim zero dependents", () => {
+    const state = deleteConfirmState("h1", "My Harness", failed, settled([]));
+    assert.equal(state.canConfirm, true);
+    assert.match(state.message, /Couldn't check/);
+    assert.doesNotMatch(state.message, /^Delete My Harness\?$/);
+  });
+
+  it("persona query failure also reports unknown blast radius", () => {
+    const state = deleteConfirmState("h1", "My Harness", settled([]), failed);
+    assert.equal(state.canConfirm, true);
+    assert.match(state.message, /Couldn't check/);
+  });
+
+  it("settled queries produce the counted warning and enable confirm", () => {
+    const agents = settled([
+      { runtime: "h1", personaId: null },
+      { runtime: null, personaId: "p1" },
+    ]);
+    const personas = settled([{ id: "p1", runtime: "h1" }]);
+    const state = deleteConfirmState("h1", "My Harness", agents, personas);
+    assert.equal(state.canConfirm, true);
+    assert.equal(
+      state.message,
+      "2 agents use this harness and will stop launching. Delete My Harness?",
+    );
+  });
+
+  it("settled queries with zero dependents use the plain confirmation", () => {
+    const state = deleteConfirmState(
+      "h1",
+      "My Harness",
+      settled([]),
+      settled([]),
+    );
+    assert.equal(state.canConfirm, true);
+    assert.equal(state.message, "Delete My Harness?");
   });
 });

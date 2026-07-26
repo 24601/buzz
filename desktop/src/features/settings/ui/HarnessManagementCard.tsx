@@ -28,9 +28,8 @@ import {
   idFromLabel,
 } from "./harnessFormLogic";
 import {
-  countAgentsReferencingHarness,
   customEntries as getCustomEntries,
-  deleteHarnessConfirmMessage,
+  deleteConfirmState,
   sortedPresetEntries,
 } from "./harnessGalleryLogic";
 import { SettingsSectionHeader } from "./SettingsSectionHeader";
@@ -446,13 +445,16 @@ function CustomHarnessRow({ entry }: { entry: AcpRuntimeCatalogEntry }) {
   const [deleteError, setDeleteError] = React.useState<string | null>(null);
   const del = useDeleteCustomHarnessMutation();
   // Blast-radius data for the delete confirmation — only fetched while the
-  // confirmation is open, so the row list doesn't poll agents.
+  // confirmation is open, so the row list doesn't poll agents. Confirm stays
+  // disabled until both queries settle (deleteConfirmState) so a quick click
+  // can't beat the "N agents will stop launching" warning.
   const agentsQuery = useManagedAgentsQuery({ enabled: confirmingDelete });
   const personasQuery = usePersonasQuery({ enabled: confirmingDelete });
-  const referencingAgents = countAgentsReferencingHarness(
+  const confirmState = deleteConfirmState(
     entry.id,
-    agentsQuery.data ?? [],
-    personasQuery.data ?? [],
+    entry.label,
+    agentsQuery,
+    personasQuery,
   );
 
   if (editing) {
@@ -507,7 +509,7 @@ function CustomHarnessRow({ entry }: { entry: AcpRuntimeCatalogEntry }) {
               <Button
                 className="h-7 px-3 text-xs"
                 data-testid={`custom-harness-delete-confirm-${entry.id}`}
-                disabled={del.isPending}
+                disabled={del.isPending || !confirmState.canConfirm}
                 onClick={() => {
                   setDeleteError(null);
                   del.mutate(entry.id, {
@@ -560,7 +562,7 @@ function CustomHarnessRow({ entry }: { entry: AcpRuntimeCatalogEntry }) {
           className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-1.5 text-sm text-amber-600 dark:text-amber-400"
           data-testid={`custom-harness-delete-warning-${entry.id}`}
         >
-          {deleteHarnessConfirmMessage(entry.label, referencingAgents)}
+          {confirmState.message}
         </p>
       ) : null}
       {deleteError ? (

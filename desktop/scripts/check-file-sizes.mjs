@@ -348,7 +348,11 @@ const overrides = new Map([
   // +13: review fix for #2773 — discovery publishes the registry by re-reading
   // the harness dir under persist_mutex (publish_harness_registry_from_dir call
   // + doc comment), closing the stale-snapshot clobber race.
-  ["src-tauri/src/managed_agents/discovery.rs", 1745],
+  // +35: review round 2 (#2773) — cfg(test) pre_publish_test_hook seam so the
+  // stale-publish regression is pinned through the REAL discover_acp_runtimes_from
+  // path (Wren's finding: the seam-only tests stayed green under a stale-publish
+  // mutant). Test-only code, zero release-build footprint.
+  ["src-tauri/src/managed_agents/discovery.rs", 1780],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -360,7 +364,11 @@ const overrides = new Map([
   // load_custom_harnesses so warm + discovery inherit identical shadowing
   // rules, publish_harness_registry_from_dir (mutex-scoped publish seam), and
   // comma-in-args validation at validate_harness_definition, with tests.
-  ["src-tauri/src/managed_agents/custom_harnesses.rs", 1198],
+  // +34: review round 2 (#2773) — Dawn's mutation finding: the loader-boundary
+  // collision/dedup enforcement was untested (deleting it left the suite green).
+  // load_applies_id_collision_check now drives the real loader against a real
+  // shadowing file, plus a dedup twin; both verified to kill the mutants.
+  ["src-tauri/src/managed_agents/custom_harnesses.rs", 1232],
   // rebase over codex-acp-package-swap: its version-probe tests union with the
   // doctor-install-reliability nvm/login-shell/semver tests — each side alone
   // stayed under the 1000 default; the union exceeds it.
@@ -378,7 +386,11 @@ const overrides = new Map([
   // +90: review fix for #2773 — deterministic interleaving regressions for the
   // discovery publish race (save-during-discovery survives publish;
   // delete-during-discovery stays gone).
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1666],
+  // +103: review round 2 (#2773) — production-path interleaving regressions:
+  // discovery_publish_path_survives_mid_flight_save / _drops_mid_flight_delete
+  // drive the real discover_acp_runtimes_from with a save/delete landed via the
+  // pre_publish_test_hook; verified to red under a stale-publish mutant.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1769],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode
@@ -536,7 +548,10 @@ const overrides = new Map([
   // (if let Some(provider_update) = input.provider { record.provider = provider_update; }).
   // +8: harness_override thread-through in update_managed_agent so a deliberate
   // Custom pin routes to update_time_agent_command_override (comment + call).
-  ["src-tauri/src/commands/agent_models.rs", 1079],
+  // +1: review round 2 (#2773) — model_discovery_error helper routes dangling-
+  // harness resolution errors through user_facing_harness_error (sentence, not
+  // raw DANGLING_HARNESS_ID sentinel) for the get_agent_models surface.
+  ["src-tauri/src/commands/agent_models.rs", 1080],
   // global-agent-config: get_agent_config_surface / write_agent_config_field /
   // put_agent_session_config commands + GlobalAgentConfig serde types. New file
   // in this PR; queued to split with the command module refactor.

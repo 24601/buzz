@@ -1730,9 +1730,44 @@ pub fn discover_acp_runtimes_from(
     // A save/delete landing during Phase 2 already re-warmed the registry; a
     // stale-snapshot publish here would clobber it (the just-saved harness
     // would become unresolvable at spawn until the next discovery).
+    //
+    // This exact line is pinned by `discovery_publish_path_survives_mid_flight_save`
+    // / `..._drops_mid_flight_delete` (discovery tests), which land a save/delete
+    // through the pre-publish test hook below and red if this reverts to
+    // publishing a stale snapshot.
+    #[cfg(test)]
+    pre_publish_test_hook::run();
     crate::managed_agents::custom_harnesses::warm_harness_registry_locked(custom_harnesses_dir);
 
     entries
+}
+
+/// Test-only seam: a callback invoked between discovery's directory scan and
+/// its registry publish, so tests can land a `save_and_warm`/`delete_and_warm`
+/// in exactly the window the stale-snapshot bug lived in — through the REAL
+/// `discover_acp_runtimes_from` call path, not a hand-called seam.
+#[cfg(test)]
+pub(crate) mod pre_publish_test_hook {
+    use std::sync::{Mutex, OnceLock};
+
+    type Hook = Box<dyn Fn() + Send>;
+
+    fn cell() -> &'static Mutex<Option<Hook>> {
+        static CELL: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+        CELL.get_or_init(|| Mutex::new(None))
+    }
+
+    /// Install (or clear, with `None`) the hook. Callers must serialize via
+    /// `registry_test_lock` — the hook is process-global.
+    pub(crate) fn set(hook: Option<Hook>) {
+        *cell().lock().unwrap_or_else(|e| e.into_inner()) = hook;
+    }
+
+    pub(crate) fn run() {
+        if let Some(hook) = cell().lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            hook();
+        }
+    }
 }
 
 pub fn managed_agent_avatar_url(command: &str) -> Option<String> {
