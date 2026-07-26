@@ -203,6 +203,7 @@ export function usePersonaModelDiscovery({
   // reference from a React Query refetch (same data, unstable ref) does not
   // abandon and re-issue an in-flight discovery IPC call.
   const selectedRuntimeAvailability = selectedRuntime?.availability;
+  const selectedRuntimeLabel = selectedRuntime?.label;
   const selectedRuntimeDefaultArgs = selectedRuntime?.defaultArgs;
   const selectedRuntimeDefinitionEnv = selectedRuntime?.definitionEnv;
   const canDiscoverModelOptions =
@@ -252,6 +253,7 @@ export function usePersonaModelDiscovery({
           formatModelDiscoveryErrorStatus(
             new Error(`Runtime not available: ${selectedRuntimeAvailability}`),
             trimmedProvider,
+            selectedRuntimeLabel,
           ),
         );
         setModelDiscoveryStatusKey(null);
@@ -320,7 +322,11 @@ export function usePersonaModelDiscovery({
           setModelDiscoveryData(null);
           setModelDiscoveryDataKey(null);
           setModelDiscoveryStatus(
-            formatModelDiscoveryErrorStatus(error, trimmedProvider),
+            formatModelDiscoveryErrorStatus(
+              error,
+              trimmedProvider,
+              selectedRuntimeLabel,
+            ),
           );
           setModelDiscoveryStatusKey(activeModelDiscoveryKey);
         })
@@ -355,6 +361,7 @@ export function usePersonaModelDiscovery({
     selectedRuntimeAvailability,
     selectedRuntimeDefaultArgs,
     selectedRuntimeDefinitionEnv,
+    selectedRuntimeLabel,
     shouldDebounceModelDiscovery,
     trimmedProvider,
   ]);

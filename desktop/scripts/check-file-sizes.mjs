@@ -326,7 +326,14 @@ const overrides = new Map([
   // stale-publish regression is pinned through the REAL discover_acp_runtimes_from
   // path (Wren's finding: the seam-only tests stayed green under a stale-publish
   // mutant). Test-only code, zero release-build footprint.
-  ["src-tauri/src/managed_agents/discovery.rs", 1780],
+  // +55: #2773 follow-up — PresetHarness.underlying_cli (Amp's amp-acp wraps
+  // the amp CLI) + preset_catalog_entry helper: adapter presence alone keeps
+  // deciding Available (adapter-present/CLI-absent stays selectable, Wren's
+  // regression catch); underlying_cli is consulted only when the adapter is
+  // absent, so AdapterMissing replaces the misleading NotInstalled. Includes
+  // the deliberate-divergence doc comments; net after the inline preset
+  // entries.push block collapsed into the helper.
+  ["src-tauri/src/managed_agents/discovery.rs", 1835],
   // BYOH — save_custom_harness_to_dir (backup-swap atomic write) + save_and_warm /
   // delete_and_warm (persist-mutex serialization for concurrent-safe registry
   // refresh, B-6). Also: id/collision/load/registry tests (from the file base) +
@@ -366,7 +373,12 @@ const overrides = new Map([
   // pre_publish_test_hook; verified to red under a stale-publish mutant.
   // +18: flake fix — lock_path_mutex + registry_test_lock guards (with lock-
   // order comments) on the four tests that drive discovery's global caches.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1787],
+  // +84: #2773 follow-up — preset_catalog_entry coverage (Amp-shaped adapter
+  // preset: AdapterMissing when CLI present, NotInstalled both-missing,
+  // Available both-present AND adapter-present/CLI-absent — the selectability
+  // regression guard), bound to an injectable resolver so the tests stay
+  // PATH-independent.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1871],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode

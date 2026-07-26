@@ -1425,6 +1425,91 @@ struct PresetHarness {
     args: &'static [&'static str],
     install_instructions_url: &'static str,
     install_hint: &'static str,
+    /// Vendor CLI the ACP command wraps, when the preset is an adapter
+    /// (e.g. Amp's `amp-acp` wraps the separately-installed `amp` CLI).
+    /// Consulted only when the adapter is absent, so `AdapterMissing`
+    /// replaces the misleading `NotInstalled` when the CLI is present but
+    /// the adapter is not. Deliberately NOT fed through the builtins'
+    /// full `classify_runtime` predicate: that would flip
+    /// adapter-present/CLI-absent from today's `Available` to `CliMissing`
+    /// (unselectable), and presets carry a single flat `install_hint`, so
+    /// the `CliMissing` copy would tell the user to install the adapter
+    /// they already have. `None` when the command IS the vendor CLI.
+    underlying_cli: Option<&'static str>,
+}
+
+/// Build the catalog entry for one preset harness through an injectable
+/// resolver — the seam the preset loop consumes and tests bind.
+///
+/// Availability consumes only the adapter-missing arm of the builtin
+/// predicate: adapter presence alone decides `Available` (exactly today's
+/// behavior — an `amp-acp` without `amp` stays selectable), and
+/// `underlying_cli` is consulted only when the adapter is absent, to
+/// distinguish `AdapterMissing` (vendor CLI present) from `NotInstalled`
+/// (neither found). See the `underlying_cli` field doc for why the full
+/// `classify_runtime` predicate is deliberately not used here.
+fn preset_catalog_entry(
+    def: &PresetHarness,
+    resolve: impl Fn(&str) -> Option<PathBuf>,
+) -> AcpRuntimeCatalogEntry {
+    let (availability, command, binary_path) = match resolve(def.command) {
+        Some(path) => (
+            AcpAvailabilityStatus::Available,
+            Some(def.command.to_string()),
+            Some(path.display().to_string()),
+        ),
+        None => {
+            let underlying_cli_found = def
+                .underlying_cli
+                .map(|cli| resolve(cli).is_some())
+                .unwrap_or(false);
+            if underlying_cli_found {
+                (AcpAvailabilityStatus::AdapterMissing, None, None)
+            } else {
+                (AcpAvailabilityStatus::NotInstalled, None, None)
+            }
+        }
+    };
+    let underlying_cli_path = def
+        .underlying_cli
+        .and_then(resolve)
+        .map(|p| p.display().to_string());
+
+    let default_args = normalize_agent_args(
+        def.command,
+        def.args.iter().map(|s| s.to_string()).collect(),
+    );
+
+    AcpRuntimeCatalogEntry {
+        id: def.id.to_string(),
+        label: def.label.to_string(),
+        // No remote URL — all preset icons are bundled assets.
+        avatar_url: String::new(),
+        availability,
+        command,
+        binary_path,
+        default_args,
+        mcp_command: None,
+        model_env_var: None,
+        provider_env_var: None,
+        thinking_env_var: None,
+        install_hint: def.install_hint.to_string(),
+        install_instructions_url: def.install_instructions_url.to_string(),
+        can_auto_install: false,
+        // Kept false even for adapter presets: presets carry one flat
+        // install_hint (the adapter's), so the requiresExternalCli
+        // "CLI is missing" wording would pair the wrong noun with it.
+        // The builtin path, with per-availability hints, is the only
+        // consumer of the true case.
+        requires_external_cli: false,
+        underlying_cli_path,
+        node_required: false,
+        auth_status: AuthStatus::NotApplicable,
+        login_hint: None,
+        source: HarnessSource::Preset,
+        // Preset entries have static, non-editable env; definition_env is empty.
+        definition_env: Default::default(),
+    }
 }
 
 const PRESET_HARNESSES: &[PresetHarness] = &[
@@ -1435,6 +1520,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["acp"],
         install_instructions_url: "https://cursor.com/downloads",
         install_hint: "Install Cursor from cursor.com/downloads.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "omp",
@@ -1443,6 +1529,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["acp"],
         install_instructions_url: "https://github.com/can1357/oh-my-pi",
         install_hint: "Install Oh My Pi from github.com/can1357/oh-my-pi.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "grok",
@@ -1451,6 +1538,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["agent", "--always-approve", "stdio"],
         install_instructions_url: "https://build.x.ai/docs",
         install_hint: "Install Grok Build from build.x.ai.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "opencode",
@@ -1459,6 +1547,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["acp"],
         install_instructions_url: "https://opencode.ai/docs",
         install_hint: "Install OpenCode from opencode.ai/docs.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "kimi",
@@ -1467,6 +1556,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &["acp"],
         install_instructions_url: "https://kimi.ai/download",
         install_hint: "Install Kimi Code from kimi.ai/download.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "amp",
@@ -1475,6 +1565,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &[],
         install_instructions_url: "https://github.com/tao12345666333/amp-acp",
         install_hint: "Install the amp-acp npm adapter: npm install -g amp-acp.",
+        underlying_cli: Some("amp"),
     },
     PresetHarness {
         id: "hermes",
@@ -1483,6 +1574,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
         args: &[],
         install_instructions_url: "https://hermes-agent.nousresearch.com",
         install_hint: "Install Hermes Agent from hermes-agent.nousresearch.com.",
+        underlying_cli: None,
     },
     PresetHarness {
         id: "openclaw",
@@ -1498,6 +1590,7 @@ const PRESET_HARNESSES: &[PresetHarness] = &[
             Gateway's execution environment. If your tools or agent logic \
             needs BUZZ_* credentials at execution time, set them on the \
             Gateway's own environment separately.",
+        underlying_cli: None,
     },
 ];
 
@@ -1626,45 +1719,7 @@ pub fn discover_acp_runtimes_from(
         }
         seen_ids.insert(def.id.to_string());
 
-        let (availability, command, binary_path) = match find_command(def.command) {
-            Some(path) => (
-                AcpAvailabilityStatus::Available,
-                Some(def.command.to_string()),
-                Some(path.display().to_string()),
-            ),
-            None => (AcpAvailabilityStatus::NotInstalled, None, None),
-        };
-
-        let default_args = normalize_agent_args(
-            def.command,
-            def.args.iter().map(|s| s.to_string()).collect(),
-        );
-
-        entries.push(AcpRuntimeCatalogEntry {
-            id: def.id.to_string(),
-            label: def.label.to_string(),
-            // No remote URL — all preset icons are bundled assets.
-            avatar_url: String::new(),
-            availability,
-            command,
-            binary_path,
-            default_args,
-            mcp_command: None,
-            model_env_var: None,
-            provider_env_var: None,
-            thinking_env_var: None,
-            install_hint: def.install_hint.to_string(),
-            install_instructions_url: def.install_instructions_url.to_string(),
-            can_auto_install: false,
-            requires_external_cli: false,
-            underlying_cli_path: None,
-            node_required: false,
-            auth_status: AuthStatus::NotApplicable,
-            login_hint: None,
-            source: HarnessSource::Preset,
-            // Preset entries have static, non-editable env; definition_env is empty.
-            definition_env: Default::default(),
-        });
+        entries.push(preset_catalog_entry(def, find_command));
     }
 
     // Phase 3: load and append custom harness definitions.
