@@ -35,6 +35,8 @@ import { useChannelNavigation } from "@/shared/context/ChannelNavigationContext"
 import { parseImetaTags } from "@/features/messages/lib/parseImeta";
 import { useMessageEmoji } from "@/features/messages/lib/useMessageEmoji";
 import { parseWaveMessageContent } from "@/features/messages/lib/waveMessage";
+import { parsePaymentMessageContent } from "@/features/wallet/lib/paymentMessage";
+import { PaymentMessageAttachment } from "@/features/wallet/ui/PaymentMessageAttachment";
 import { resolveSnapshotSharedBy } from "@/features/messages/lib/snapshotSharedBy";
 import { resolveMentionProps } from "@/shared/lib/resolveMentionNames";
 import { Markdown } from "@/shared/ui/markdown";
@@ -336,6 +338,17 @@ export const MessageRow = React.memo(
           );
         default:
           {
+            const paymentMessage = parsePaymentMessageContent(message.body);
+            if (paymentMessage) {
+              return (
+                <PaymentMessageAttachment
+                  amountLabel={paymentMessage.amountLabel}
+                  memo={paymentMessage.memo}
+                  recipientName={paymentMessage.recipientName}
+                />
+              );
+            }
+
             const waveMessage = parseWaveMessageContent(message.body);
             if (waveMessage) {
               return (

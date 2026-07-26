@@ -388,6 +388,12 @@ const overrides = new Map([
   // the embedded runtime and coordinator. Probe/re-arm logic lives in
   // mesh_llm/recovery.rs rather than growing AppState or command modules.
   ["src-tauri/src/app_state.rs", 1085],
+  // wallet preview payment gate: useWalletPaymentGate import + gatedOnSend
+  // swap on the composer + confirmation-dialog slot (+6 lines). The gate must
+  // wrap handleSendMessage at the pane boundary (MessageComposer is itself at
+  // its own override cap and queued to split). Preview-feature plumbing, not
+  // generic debt growth; queued to split with the pane's overlay cluster.
+  ["src/features/channels/ui/ChannelPane.tsx", 1004],
   // multi-slot splitting + no-op suppression (#1309): the ReadStateManager
   // class grew from ~700 lines to ~1019 with the addition of
   // splitContextsIntoBudgetedSlots (pure fn + 5 tests), publishSplitSlots,

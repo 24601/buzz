@@ -26,6 +26,7 @@ import {
 } from "@/features/messages/lib/videoReviewContext";
 import { useComposerHeightPadding } from "@/features/messages/ui/useComposerHeightPadding";
 import { TypingIndicatorRow } from "@/features/messages/ui/TypingIndicatorRow";
+import { useWalletPaymentGate } from "@/features/wallet/ui/useWalletPaymentGate";
 import { UserProfilePanel } from "@/features/profile/ui/UserProfilePanel";
 import { ChannelFindBar } from "@/features/search/ui/ChannelFindBar";
 import { AgentSessionThreadPanel } from "@/features/channels/ui/AgentSessionThreadPanel";
@@ -399,6 +400,8 @@ export const ChannelPane = React.memo(function ChannelPane({
   );
   const canDropInMainColumn =
     hasMainComposerOverlay && !isComposerDisabled && !isSinglePanelView;
+  // Wallet preview: "$20 @Mat lunch" pauses on a confirm dialog before sending.
+  const paymentGate = useWalletPaymentGate(handleSendMessage);
   const hasTypingActivity = typingPubkeys.length > 0;
   // Unified working set for the composer bar: observer-derived turns primary,
   // bot typing fallback (both folded together by agentWorkingSignal). This is
@@ -767,7 +770,7 @@ export const ChannelPane = React.memo(function ChannelPane({
                       ? prepareDmSendChannel
                       : undefined
                   }
-                  onSend={handleSendMessage}
+                  onSend={paymentGate.gatedOnSend}
                   profiles={profiles}
                   placeholder={
                     timeoutState.active
@@ -994,6 +997,7 @@ export const ChannelPane = React.memo(function ChannelPane({
           })()
         ) : null}
       </AnimatePresence>
+      {paymentGate.paymentConfirmDialog}
     </div>
   );
 });

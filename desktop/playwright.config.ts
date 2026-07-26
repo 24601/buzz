@@ -60,6 +60,7 @@ export default defineConfig({
         "**/spoiler.spec.ts",
         "**/composer-link-shortcut.spec.ts",
         "**/composer-tooltip-dismiss.spec.ts",
+        "**/wallet-conversational-screenshots.spec.ts",
         "**/mentions.spec.ts",
         "**/team-mentions.spec.ts",
         "**/persistent-agent-audience.spec.ts",

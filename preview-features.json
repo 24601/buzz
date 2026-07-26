@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "wallet",
+      "name": "Bitcoin Wallet",
+      "description": "Conversational Lightning wallet prototype: balance and funding in the top chrome, payments made by talking",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }

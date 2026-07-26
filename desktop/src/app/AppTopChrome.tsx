@@ -11,6 +11,8 @@ import { useIsFullscreen } from "@/shared/lib/useIsFullscreen";
 import { Button } from "@/shared/ui/button";
 import { cn } from "@/shared/lib/cn";
 import { topChromeBackdrop } from "@/shared/layout/chromeLayout";
+import { FeatureGate } from "@/shared/features";
+import { WalletChip } from "@/features/wallet/ui/WalletChip";
 import { useOptionalSidebar } from "@/shared/ui/sidebar";
 
 type AppTopChromeProps = {
@@ -130,6 +132,11 @@ export function AppTopChrome({
         >
           <ChevronRight />
         </Button>
+      </div>
+      <div className="ml-auto flex items-center">
+        <FeatureGate feature="wallet">
+          <WalletChip />
+        </FeatureGate>
       </div>
     </div>
   );
