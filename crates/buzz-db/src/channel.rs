@@ -2277,6 +2277,99 @@ mod tests {
         println!("last-owner demotion rejected: {err}");
     }
 
+    /// Isolates the actor-authorization guard from the last-owner guard.
+    ///
+    /// `repro_unprivileged_member_can_demote_owner` demotes the *sole* owner, so
+    /// the last-owner guard alone is enough to reject it: stubbing out the actor
+    /// check leaves that test green and the authorization hole invisible. Here a
+    /// second owner remains, so the last-owner guard cannot fire and only the
+    /// actor check stands between an unprivileged member and a co-owner's role.
+    #[tokio::test]
+    #[ignore = "requires Postgres"]
+    async fn unprivileged_member_cannot_demote_a_co_owner() {
+        let pool = setup_pool().await;
+        let community_id = make_test_community(&pool).await;
+        let community = CommunityId::from_uuid(community_id);
+        let owner = random_pubkey();
+        let co_owner = random_pubkey();
+        let attacker = random_pubkey();
+
+        for pk in [&owner, &co_owner, &attacker] {
+            ensure_user(&pool, community, pk)
+                .await
+                .expect("ensure user");
+        }
+
+        let channel = create_test_channel(
+            &pool,
+            community_id,
+            "co-owner-demotion-authz",
+            ChannelType::Stream,
+            ChannelVisibility::Open,
+            None,
+            &owner,
+            None,
+        )
+        .await
+        .expect("create channel");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &co_owner,
+            MemberRole::Owner,
+            Some(&owner),
+        )
+        .await
+        .expect("owner may promote a co-owner");
+
+        add_member(
+            &pool,
+            community,
+            channel.id,
+            &attacker,
+            MemberRole::Member,
+            None,
+        )
+        .await
+        .expect("attacker self-joins the open channel");
+
+        // Two owners remain, so the last-owner guard cannot reject this. Only
+        // the actor-authorization check can.
+        let err = add_member(
+            &pool,
+            community,
+            channel.id,
+            &co_owner,
+            MemberRole::Member,
+            Some(&attacker),
+        )
+        .await
+        .expect_err("an unprivileged member must not demote a co-owner");
+        println!("co-owner demotion by unprivileged actor rejected: {err}");
+
+        let members = get_members(&pool, community, channel.id)
+            .await
+            .expect("members");
+        let role_of = |pk: &Vec<u8>| {
+            members
+                .iter()
+                .find(|m| &m.pubkey == pk)
+                .map(|m| m.role.clone())
+        };
+        assert_eq!(
+            role_of(&co_owner).as_deref(),
+            Some("owner"),
+            "co-owner must keep their role"
+        );
+        assert_eq!(
+            members.iter().filter(|m| m.role == "owner").count(),
+            2,
+            "both owners must survive"
+        );
+    }
+
     /// Sets up an open channel with exactly two owners, returning
     /// `(community, channel_id, owner_a, owner_b)`.
     async fn channel_with_two_owners(

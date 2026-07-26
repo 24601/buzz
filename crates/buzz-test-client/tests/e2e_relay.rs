@@ -2748,3 +2748,168 @@ async fn test_nip29_put_user_without_role_tag_preserves_role() {
         "an absent role tag means no role change — it must not demote an owner"
     );
 }
+
+/// SECURITY (Dawn), relay-layer guard isolation — the *validator*, not the DB.
+///
+/// The DB guards in `add_member` are what actually stop the privesc, and every
+/// other test here asserts the resulting STATE ("the role didn't change").
+/// That makes them structurally blind to `validate_admin_event`: stubbing out
+/// either relay-side check leaves the whole nip29 suite green, because the DB
+/// still refuses the write and the role is still correct. Verified by mutation
+/// — the relay returns `accepted:true` and logs `Side effect failed: access
+/// denied: ...` while the state assertion happily passes.
+///
+/// The relay guards earn their keep by giving the client an honest
+/// `accepted:false` instead of an OK for an event that silently fails after the
+/// fact. So these two tests assert `accepted == false` — the one observable
+/// only the validator controls — and each is shaped so exactly one guard can
+/// fire.
+///
+/// Guard under test: "only owners/admins may change an active member's role".
+/// TWO owners on purpose, so the last-owner guard cannot fire and take the
+/// credit; a plain member targeting a co-owner leaves the actor check as the
+/// only thing that can reject.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_relay_rejects_role_change_by_unprivileged_actor() {
+    let url = relay_url();
+
+    let owner_a = Keys::generate();
+    let owner_b = Keys::generate();
+    let b_hex = owner_b.public_key().to_hex();
+    let attacker = Keys::generate();
+    let attacker_hex = attacker.public_key().to_hex();
+    let channel_id = create_test_channel(&owner_a).await;
+
+    // owner_a promotes owner_b -> the channel has two owners.
+    let mut ws = BuzzTestClient::connect(&url, &owner_a)
+        .await
+        .expect("connect as owner_a");
+    let promote = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+            Tag::parse(["role", "owner"]).unwrap(),
+        ])
+        .sign_with_keys(&owner_a)
+        .expect("sign promote");
+    let ok = ws.send_event(promote).await.expect("send promote");
+    ws.disconnect().await.ok();
+    assert!(ok.accepted, "promote rejected: {}", ok.message);
+
+    // The attacker joins the open channel as a plain member.
+    let mut ws = BuzzTestClient::connect(&url, &attacker)
+        .await
+        .expect("connect as attacker");
+    let join = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &attacker_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&attacker)
+        .expect("sign self-join");
+    let ok = ws.send_event(join).await.expect("send self-join");
+    ws.disconnect().await.ok();
+    assert!(ok.accepted, "self-join rejected: {}", ok.message);
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &attacker_hex)
+            .await
+            .as_deref(),
+        Some("member"),
+        "attacker must be an active plain member before the probe"
+    );
+
+    // The probe: a plain member demotes a co-owner. Two owners remain, so only
+    // the actor-authorization guard can reject this.
+    let mut ws = BuzzTestClient::connect(&url, &attacker)
+        .await
+        .expect("connect as attacker");
+    let attack = EventBuilder::new(Kind::Custom(9000), "")
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &b_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&attacker)
+        .expect("sign attack");
+    let ok = ws.send_event(attack).await.expect("send attack");
+    ws.disconnect().await.ok();
+    println!(
+        "unprivileged co-owner demotion -> accepted={} {}",
+        ok.accepted, ok.message
+    );
+
+    assert!(
+        !ok.accepted,
+        "the relay validator must reject an unprivileged actor's role change, \
+         not accept it and let the side effect fail silently"
+    );
+    assert_eq!(
+        member_role(&url, &owner_a, &channel_id, &b_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "co-owner must keep their role"
+    );
+}
+
+/// SECURITY (Dawn), relay-layer guard isolation — see the test above for why
+/// `accepted` rather than state is the assertion that matters here.
+///
+/// Guard under test: the relay-side last-owner check. The actor is the SOLE
+/// owner demoting themselves, so the actor-authorization guard is satisfied
+/// (an owner is elevated) and cannot mask the result — only the last-owner
+/// check can reject.
+#[tokio::test]
+#[ignore]
+async fn test_nip29_relay_rejects_last_owner_self_demotion() {
+    let url = relay_url();
+
+    let owner = Keys::generate();
+    let owner_hex = owner.public_key().to_hex();
+    let channel_id = create_test_channel(&owner).await;
+
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &owner_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "creator must be the sole owner before the probe"
+    );
+
+    // The probe: the sole owner demotes themselves. Elevated actor, so the
+    // actor check passes; the last-owner guard is the only thing left.
+    let mut ws = BuzzTestClient::connect(&url, &owner)
+        .await
+        .expect("connect as owner");
+    let demote = EventBuilder::new(Kind::Custom(9000), "")
+        .allow_self_tagging()
+        .tags([
+            Tag::parse(["h", &channel_id]).unwrap(),
+            Tag::parse(["p", &owner_hex]).unwrap(),
+            Tag::parse(["role", "member"]).unwrap(),
+        ])
+        .sign_with_keys(&owner)
+        .expect("sign self-demote");
+    let ok = ws.send_event(demote).await.expect("send self-demote");
+    ws.disconnect().await.ok();
+    println!(
+        "sole-owner self-demotion -> accepted={} {}",
+        ok.accepted, ok.message
+    );
+
+    assert!(
+        !ok.accepted,
+        "the relay validator must reject demoting the last owner, not accept \
+         it and let the side effect fail silently"
+    );
+    assert_eq!(
+        member_role(&url, &owner, &channel_id, &owner_hex)
+            .await
+            .as_deref(),
+        Some("owner"),
+        "the last owner must keep their role"
+    );
+}
