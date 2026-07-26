@@ -48,6 +48,12 @@ class ChannelSectionsManager {
   void Function()? _unsubscribe;
   bool _disposed = false;
 
+  /// Base delay for the startup-sync retry backoff. Overridable in tests.
+  final Duration _startupRetryBaseDelay;
+  Timer? _startupRetryTimer;
+  int _startupRetryAttempt = 0;
+  bool _startupFetchSucceeded = false;
+
   ChannelSectionsManager({
     required this.pubkey,
     required SharedPreferences prefs,
@@ -56,12 +62,15 @@ class ChannelSectionsManager {
     required SignedEventRelay? signedEventRelay,
     required bool remoteEnabled,
     required VoidCallback onChanged,
+    @visibleForTesting
+    Duration startupRetryBaseDelay = const Duration(seconds: 2),
   }) : _storage = ChannelSectionsStorage(prefs),
        _crypto = crypto,
        _relaySession = relaySession,
        _signedEventRelay = signedEventRelay,
        _remoteEnabled = remoteEnabled,
        _onChanged = onChanged,
+       _startupRetryBaseDelay = startupRetryBaseDelay,
        _store = ChannelSectionsStorage(prefs).read(pubkey);
 
   ChannelSectionStore get store => _store;
@@ -74,14 +83,56 @@ class ChannelSectionsManager {
       return;
     }
 
-    await _fetchAndMerge();
-    await _startLiveSubscription();
+    await _syncWithRelay();
     _onChanged();
+  }
+
+  /// One startup-sync attempt: fetch the remote blob, then start the live
+  /// subscription. Either step can lose a transient race on cold start (the
+  /// relay rate-limits the burst of per-channel subscriptions and rejects
+  /// with `rate-limited: quota exceeded`) — retry with backoff instead of
+  /// silently giving up, which left desktop-created groups invisible until
+  /// an unrelated refetch.
+  Future<void> _syncWithRelay() async {
+    if (!_startupFetchSucceeded) {
+      _startupFetchSucceeded = await _fetchAndMerge();
+    }
+
+    final subscribed = _unsubscribe != null || await _startLiveSubscription();
+
+    if (!_startupFetchSucceeded || !subscribed) {
+      _scheduleStartupRetry();
+    }
+  }
+
+  void _scheduleStartupRetry() {
+    if (_disposed) return;
+    _startupRetryTimer?.cancel();
+    final delayMs = min(
+      _startupRetryBaseDelay.inMilliseconds << min(_startupRetryAttempt, 5),
+      30000,
+    );
+    _startupRetryAttempt++;
+    debugPrint(
+      '[ChannelSectionsManager] startup sync incomplete; '
+      'retrying in ${delayMs}ms (attempt $_startupRetryAttempt)',
+    );
+    _startupRetryTimer = Timer(Duration(milliseconds: delayMs), () {
+      _startupRetryTimer = null;
+      unawaited(
+        _syncWithRelay().then((_) {
+          if (!_disposed) _onChanged();
+        }),
+      );
+    });
   }
 
   void dispose({bool flushPending = true}) {
     if (_disposed) return;
     _disposed = true;
+
+    _startupRetryTimer?.cancel();
+    _startupRetryTimer = null;
 
     final hadPending = _publishDebounce != null;
     _publishDebounce?.cancel();
@@ -201,8 +252,10 @@ class ChannelSectionsManager {
     });
   }
 
-  Future<void> _fetchAndMerge() async {
-    if (_relaySession == null) return;
+  /// Returns whether the fetch reached the relay (regardless of whether a
+  /// remote blob exists).
+  Future<bool> _fetchAndMerge() async {
+    if (_relaySession == null) return false;
     try {
       final events = await _relaySession.fetchHistory(
         NostrFilter(
@@ -217,13 +270,17 @@ class ChannelSectionsManager {
       _mergeEvents(events);
       _persist();
       if (!_disposed) _onChanged();
-    } catch (_) {
+      return true;
+    } catch (error) {
+      debugPrint('[ChannelSectionsManager] fetch failed: $error');
       // Local state remains usable when relay is unavailable.
+      return false;
     }
   }
 
-  Future<void> _startLiveSubscription() async {
-    if (_relaySession == null) return;
+  /// Returns whether the live subscription was established.
+  Future<bool> _startLiveSubscription() async {
+    if (_relaySession == null) return false;
     try {
       _unsubscribe = await _relaySession.subscribe(
         NostrFilter(
@@ -236,8 +293,12 @@ class ChannelSectionsManager {
         ),
         _handleIncomingEvent,
       );
-    } catch (_) {
-      // Non-fatal — local state and history still work.
+      return true;
+    } catch (error) {
+      debugPrint('[ChannelSectionsManager] live subscription failed: $error');
+      // Non-fatal — local state and history still work; retried by the
+      // startup-sync backoff.
+      return false;
     }
   }
 
