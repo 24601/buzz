@@ -563,7 +563,7 @@ export function AppSidebar({
     >
       <div
         className={`relative flex min-h-0 flex-1 flex-col overflow-hidden ${
-          communities.length > 1 ? "-ml-[11px] w-[calc(100%+11px)]" : ""
+          communities.length > 1 ? "md:-ml-[11px] md:w-[calc(100%+11px)]" : ""
         }`}
         data-sidebar-background
         data-testid="app-sidebar-scroll-anchor"

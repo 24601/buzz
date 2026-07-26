@@ -44,6 +44,7 @@ test("mobile pairing starts on demand and reveals the QR code", async ({
   const sectionCenter = (sectionBox?.x ?? 0) + (sectionBox?.width ?? 0) / 2;
   const cardCenter = (cardBox?.x ?? 0) + (cardBox?.width ?? 0) / 2;
   expect(Math.abs(sectionCenter - cardCenter)).toBeLessThan(0.5);
+  await waitForAnimations(page);
   await card.screenshot({ path: `${SCREENSHOT_DIR}/pairing-start.png` });
 
   await startButton.click();
