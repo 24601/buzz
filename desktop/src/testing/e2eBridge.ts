@@ -1,6 +1,6 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
-import { decode } from "nostr-tools/nip19";
+import { decode, nsecEncode } from "nostr-tools/nip19";
 import { finalizeEvent, getPublicKey } from "nostr-tools/pure";
 import { parse as yamlParse } from "yaml";
 
@@ -7089,6 +7089,15 @@ let mockGlobalAgentConfig: {
 // Per-page get_nsec call counter for sequenced error testing.
 let nsecCallCount = 0;
 
+// Shape-valid NIP-49 spec-vector blob returned by the mocked
+// `create_ncryptsec_backup` (same vector the Rust tests use). It never
+// corresponds to the mock identity — browser specs assert flow, not crypto.
+const MOCK_NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+// The single passphrase the mocked backup commands accept/emit.
+const MOCK_BACKUP_PASSPHRASE = "mock horse battery staple lake orbit";
+
 // Per-page confirm_team_snapshot_import call counter for sequenced error testing.
 let teamSnapshotConfirmCallCount = 0;
 
@@ -9423,6 +9432,31 @@ export function maybeInstallE2eTauriMocks() {
         }
         return "nsec1mock000000000000000000000000000000000000000000000000000000";
       }
+      case "generate_backup_passphrase":
+        // Deterministic mock: production generates 6 EFF short-wordlist words
+        // from OS entropy in Rust. Specs only assert display/flow, never
+        // entropy quality.
+        return MOCK_BACKUP_PASSPHRASE;
+      case "create_ncryptsec_backup": {
+        // Production encrypts the live key under the passphrase, persists
+        // `identity.ncryptsec`, and returns the exact persisted blob. The
+        // browser harness has no key material or filesystem — return a
+        // shape-valid mock blob so the display/copy/save flow can proceed.
+        const password = (payload as { password?: string } | null)?.password;
+        if (!password) {
+          throw new Error("A passphrase is required.");
+        }
+        return MOCK_NCRYPTSEC;
+      }
+      case "save_ncryptsec_copy": {
+        const blob = (payload as { ncryptsec?: string } | null)?.ncryptsec;
+        if (!blob?.startsWith("ncryptsec1")) {
+          throw new Error("Not a valid encrypted key backup.");
+        }
+        // Production opens a native save dialog; the harness pretends the
+        // user picked a path.
+        return "/mock/backups/identity.ncryptsec";
+      }
       case "persist_current_identity": {
         // Persist the ephemeral key: clears only the lost flag. The locked flag
         // is cleared only by import_identity; production rejects
@@ -9438,12 +9472,33 @@ export function maybeInstallE2eTauriMocks() {
           locked: false,
         };
       }
-      case "import_identity":
+      case "import_identity": {
+        const request = payload as {
+          nsec?: string;
+          password?: string;
+        } | null;
+        const input = request?.nsec ?? "";
+        if (input.trim().startsWith("ncryptsec1")) {
+          // Production decrypts in Rust and rejects a wrong passphrase. The
+          // harness has no scrypt: the spec-vector blob + the fixed mock
+          // passphrase decrypt to the default mock identity's key; anything
+          // else is a wrong passphrase / corrupted backup.
+          if (
+            input.trim() !== MOCK_NCRYPTSEC ||
+            request?.password !== MOCK_BACKUP_PASSPHRASE
+          ) {
+            throw new Error("Wrong passphrase or corrupted backup.");
+          }
+          mockIdentityLostCleared = true;
+          mockIdentityLockedCleared = true;
+          return importMockIdentity(
+            nsecEncode(hexToBytes(DEFAULT_REAL_IDENTITY.privateKey)),
+          );
+        }
         mockIdentityLostCleared = true;
         mockIdentityLockedCleared = true;
-        return importMockIdentity(
-          (payload as { nsec?: string } | null)?.nsec ?? "",
-        );
+        return importMockIdentity(input);
+      }
       case "validate_repos_dir":
         // The browser harness has no host filesystem to validate. Treat the
         // seeded empty/default path as valid so Add Community can continue to

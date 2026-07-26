@@ -8,11 +8,28 @@ type NsecMaskedDisplayProps = {
   /** "bare" drops the boxed chrome for the onboarding spotlight treatment. */
   variant?: "boxed" | "bare";
   /**
+   * What kind of secret is displayed. Drives labels, aria and testids:
+   * a raw private key ("nsec", default) can impersonate its holder; an
+   * encrypted backup ("ncryptsec") is only as sensitive as its passphrase.
+   */
+  kind?: "nsec" | "ncryptsec";
+  /**
    * Called when the user reveals or copies the key. Lets flows that require
    * a backup (e.g. sign-out) gate on actual interaction with the key.
    */
   onKeyInteraction?: () => void;
 };
+
+const KIND_LABELS = {
+  nsec: {
+    noun: "private key",
+    testIdPrefix: "nsec",
+  },
+  ncryptsec: {
+    noun: "encrypted backup",
+    testIdPrefix: "ncryptsec",
+  },
+} as const;
 
 export const ONBOARDING_KEY_FRAME_CLASS =
   "w-full min-w-0 rounded-xl bg-white/50 px-8 py-6";
@@ -30,8 +47,10 @@ export const ONBOARDING_KEY_TEXT_CLASS = "buzz-onboarding-key-text";
 export function NsecMaskedDisplay({
   nsec,
   variant = "boxed",
+  kind = "nsec",
   onKeyInteraction,
 }: NsecMaskedDisplayProps) {
+  const labels = KIND_LABELS[kind];
   const [isRevealed, setIsRevealed] = React.useState(false);
   const [isCopied, setIsCopied] = React.useState(false);
   const copyTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -100,16 +119,18 @@ export function NsecMaskedDisplay({
                 ? `select-text ${isBare ? "" : "text-foreground"}`
                 : `select-none blur-[4px] ${isBare ? "" : "text-muted-foreground"}`
             }`}
-            data-testid="nsec-value"
+            data-testid={`${labels.testIdPrefix}-value`}
           >
             {isRevealed ? nsec : maskedNsec}
           </p>
         </div>
         <div className={`flex shrink-0 ${isBare ? "gap-1.5" : "gap-1"}`}>
           <Button
-            aria-label={isRevealed ? "Hide private key" : "Reveal private key"}
+            aria-label={
+              isRevealed ? `Hide ${labels.noun}` : `Reveal ${labels.noun}`
+            }
             className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
-            data-testid="nsec-reveal-toggle"
+            data-testid={`${labels.testIdPrefix}-reveal-toggle`}
             onClick={handleRevealToggle}
             size="icon"
             type="button"
@@ -122,9 +143,9 @@ export function NsecMaskedDisplay({
             )}
           </Button>
           <Button
-            aria-label="Copy private key"
+            aria-label={`Copy ${labels.noun}`}
             className={`${isBare ? "h-10 w-10" : "h-7 w-7"} text-muted-foreground hover:text-foreground`}
-            data-testid="nsec-copy"
+            data-testid={`${labels.testIdPrefix}-copy`}
             onClick={() => void handleCopy()}
             size="icon"
             type="button"

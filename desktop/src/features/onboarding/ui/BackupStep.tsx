@@ -11,21 +11,33 @@ import {
   type OnboardingTransitionDirection,
   OnboardingSlideTransition,
 } from "./OnboardingSlideTransition";
+import { EncryptedBackupCreator } from "./EncryptedBackupCreator";
 import { NsecMaskedDisplay } from "./NsecMaskedDisplay";
+
+export type BackupStepMode = "encrypted" | "raw";
 
 /**
  * Pure helper so the disabled logic can be unit-tested without a DOM.
  *
- * Disabled while loading (key not fetched yet) or after a failed load (only
- * the explicit "Skip for now" ghost advances past an error).
+ * Encrypted mode (default): Next unlocks once the backup blob exists — the
+ * user must either create a backup or explicitly switch to the raw key.
+ * Raw mode: disabled while loading or after a failed load (only the explicit
+ * "Skip for now" ghost advances past an error), matching the previous flow.
  */
 export function backupNextDisabled({
+  mode,
+  hasBackup,
   isLoading,
   loadError,
 }: {
+  mode: BackupStepMode;
+  hasBackup: boolean;
   isLoading: boolean;
   loadError: string | null;
 }): boolean {
+  if (mode === "encrypted") {
+    return !hasBackup;
+  }
   return isLoading || loadError !== null;
 }
 
@@ -36,12 +48,16 @@ type BackupStepProps = {
 };
 
 /**
- * Onboarding backup step — shows the user their freshly created key so they
- * can save it somewhere safe. Only shown on the fresh-key path.
+ * Onboarding backup step — encrypted by default. The user protects their
+ * freshly created key with a passphrase and gets a NIP-49 `ncryptsec1…`
+ * backup; the raw key is only fetched (and shown) after an explicit
+ * "Show raw key instead" click. The default path never invokes `get_nsec`.
  */
 export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
+  const [mode, setMode] = React.useState<BackupStepMode>("encrypted");
+  const [hasBackup, setHasBackup] = React.useState(false);
   const [nsec, setNsec] = React.useState<string | null>(null);
-  const [isLoading, setIsLoading] = React.useState(true);
+  const [isLoading, setIsLoading] = React.useState(false);
   const [loadError, setLoadError] = React.useState<string | null>(null);
   const cancelledRef = React.useRef(false);
 
@@ -65,13 +81,17 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
 
   React.useEffect(() => {
     cancelledRef.current = false;
-    void loadNsec();
     return () => {
       // Back-during-fetch: cancel any in-flight setState calls and clear the
       // nsec from memory on unmount (backup step is only on the fresh-key path).
       cancelledRef.current = true;
       setNsec(null);
     };
+  }, []);
+
+  const showRawKey = React.useCallback(() => {
+    setMode("raw");
+    void loadNsec();
   }, [loadNsec]);
 
   return (
@@ -86,13 +106,23 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           Your unique identity key has been created
         </h1>
         <p className="mt-5 text-sm leading-6 text-foreground/80">
-          This key is stored in your system keychain, but save it some place
-          safe in case you ever need to restore your account.
+          {mode === "encrypted"
+            ? "Protect it with a passphrase and keep an encrypted backup in case you ever need to restore your account."
+            : "This key is stored in your system keychain, but save it some place safe in case you ever need to restore your account."}
         </p>
       </div>
 
       <div className="flex w-full max-w-[1040px] flex-1 flex-col justify-center py-10">
-        {isLoading ? (
+        {mode === "encrypted" ? (
+          <Card className="w-full px-8 py-6" variant="textured">
+            <div className="mx-auto w-full max-w-[832px]">
+              <EncryptedBackupCreator
+                onCreated={() => setHasBackup(true)}
+                variant="spotlight"
+              />
+            </div>
+          </Card>
+        ) : isLoading ? (
           <div className="flex items-center justify-center gap-2 py-6 text-sm text-foreground/70">
             <Spinner className="h-4 w-4 border-2" />
             Loading your private key…
@@ -134,7 +164,22 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
           </p>
         )}
 
-        {nsec ? (
+        {mode === "encrypted" && !hasBackup ? (
+          <div className="mt-4 flex justify-center">
+            <Button
+              className="h-8 text-sm text-muted-foreground hover:text-accent-foreground"
+              data-testid="backup-show-raw-key"
+              onClick={showRawKey}
+              size="sm"
+              type="button"
+              variant="ghost"
+            >
+              Show raw key instead
+            </Button>
+          </div>
+        ) : null}
+
+        {mode === "raw" && nsec ? (
           <p className="mx-auto mt-6 flex max-w-[440px] items-start justify-center gap-1.5 text-center text-xs leading-5 text-[var(--buzz-onboarding-backup-ink)]">
             <Info className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
@@ -149,14 +194,19 @@ export function BackupStep({ direction, onBack, onNext }: BackupStepProps) {
         <Button
           className={ONBOARDING_PRIMARY_CTA_CLASS}
           data-testid="onboarding-next"
-          disabled={backupNextDisabled({ isLoading, loadError })}
+          disabled={backupNextDisabled({
+            mode,
+            hasBackup,
+            isLoading,
+            loadError,
+          })}
           onClick={onNext}
           type="button"
         >
           Next
         </Button>
 
-        {loadError ? (
+        {mode === "raw" && loadError ? (
           <Button
             className="h-9 rounded-full px-5 text-muted-foreground hover:text-accent-foreground"
             data-testid="backup-skip"

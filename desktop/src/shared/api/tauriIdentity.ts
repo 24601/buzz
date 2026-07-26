@@ -27,9 +27,43 @@ export async function getNsec(): Promise<string> {
   return invokeTauri<string>("get_nsec");
 }
 
-export async function importIdentity(nsec: string): Promise<Identity> {
+/**
+ * Import an identity from a raw `nsec1…` key or an encrypted `ncryptsec1…`
+ * backup. Encrypted backups require `password`; decryption happens in Rust.
+ */
+export async function importIdentity(
+  nsec: string,
+  password?: string,
+): Promise<Identity> {
   return fromRawIdentity(
-    await invokeTauri<RawIdentity>("import_identity", { nsec }),
+    await invokeTauri<RawIdentity>("import_identity", { nsec, password }),
+  );
+}
+
+/** Generate a 6-word passphrase (EFF short wordlist, OS entropy) in Rust. */
+export async function generateBackupPassphrase(): Promise<string> {
+  return invokeTauri<string>("generate_backup_passphrase");
+}
+
+/**
+ * Create the canonical app-managed NIP-49 backup: encrypts the live identity
+ * under `password`, persists `identity.ncryptsec` (atomic, 0o600), and
+ * returns the exact persisted `ncryptsec1…` string. Takes ~2s (scrypt).
+ */
+export async function createNcryptsecBackup(password: string): Promise<string> {
+  return invokeTauri<string>("create_ncryptsec_backup", { password });
+}
+
+/**
+ * Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
+ * Returns the chosen path, or `null` when the user cancelled.
+ */
+export async function saveNcryptsecCopy(
+  ncryptsec: string,
+): Promise<string | null> {
+  return (
+    (await invokeTauri<string | null>("save_ncryptsec_copy", { ncryptsec })) ??
+    null
   );
 }
 

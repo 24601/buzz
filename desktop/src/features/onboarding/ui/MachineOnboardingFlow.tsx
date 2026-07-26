@@ -98,8 +98,8 @@ export function MachineOnboardingFlow({
   }, [queryClient]);
 
   const importExistingIdentity = React.useCallback(
-    async (nsec: string) => {
-      const identity = await importIdentity(nsec);
+    async (nsec: string, password?: string) => {
+      const identity = await importIdentity(nsec, password);
       continueWithIdentity(identity.pubkey);
       queryClient.setQueryData(["identity"], identity);
       setIdentityWasImported(true);

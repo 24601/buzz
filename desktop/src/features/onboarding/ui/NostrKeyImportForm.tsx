@@ -3,6 +3,10 @@ import { Check, Eye, EyeOff, KeyRound } from "lucide-react";
 
 import { cn } from "@/shared/lib/cn";
 import { nsecToNpub } from "@/shared/lib/nostrUtils";
+import {
+  classifyKeyImportInput,
+  keyImportSubmitEnabled,
+} from "../lib/keyImportInput";
 import { Button } from "@/shared/ui/button";
 import { Card } from "@/shared/ui/card";
 import { Input } from "@/shared/ui/input";
@@ -17,7 +21,7 @@ type NostrKeyImportFormProps = {
   disabled?: boolean;
   errorMessage?: string | null;
   onBack: () => void;
-  onImport: (nsec: string) => Promise<void>;
+  onImport: (nsec: string, password?: string) => Promise<void>;
   /** "spotlight" is the first-launch treatment: glowy centered input, no drop zone, pill buttons. */
   variant?: "default" | "spotlight";
 };
@@ -38,6 +42,7 @@ export function NostrKeyImportForm({
   variant = "default",
 }: NostrKeyImportFormProps) {
   const [nsecInput, setNsecInput] = React.useState("");
+  const [passphrase, setPassphrase] = React.useState("");
   const [isImporting, setIsImporting] = React.useState(false);
   const [importError, setImportError] = React.useState<string | null>(null);
   const [isDragging, setIsDragging] = React.useState(false);
@@ -47,6 +52,8 @@ export function NostrKeyImportForm({
   const previewNpub = React.useMemo(() => nsecToNpub(nsecInput), [nsecInput]);
   const trimmedInput = nsecInput.trim();
   const hasInput = trimmedInput.length > 0;
+  const inputKind = classifyKeyImportInput(nsecInput);
+  const isEncryptedInput = inputKind === "ncryptsec";
 
   // Masked-by-default must re-assert whenever the field empties: a sticky
   // reveal from a previous key must never apply to newly pasted content the
@@ -56,9 +63,17 @@ export function NostrKeyImportForm({
       setIsRevealed(false);
     }
   }, [hasInput]);
-  const isValid = previewNpub !== null;
+  // A stale passphrase must never ride along when the input stops being an
+  // encrypted backup (cleared field, or replaced with a raw nsec).
+  React.useEffect(() => {
+    if (!isEncryptedInput) {
+      setPassphrase("");
+    }
+  }, [isEncryptedInput]);
+  const isValid = keyImportSubmitEnabled(nsecInput, passphrase);
   const isInteractionDisabled = disabled || isImporting;
-  const showInvalidHint = hasInput && !isValid && trimmedInput.length >= 5;
+  const showInvalidHint =
+    hasInput && !isValid && !isEncryptedInput && trimmedInput.length >= 5;
   const errorMessage = importError ?? externalErrorMessage;
 
   React.useLayoutEffect(() => {
@@ -108,9 +123,11 @@ export function NostrKeyImportForm({
       return;
     }
 
-    if (!previewNpub) {
+    if (!isValid) {
       setImportError(
-        "That doesn't look like a valid nsec. Paste an nsec1 key.",
+        isEncryptedInput
+          ? "Enter the passphrase for this encrypted backup."
+          : "That doesn't look like a valid nsec. Paste an nsec1 key.",
       );
       return;
     }
@@ -119,7 +136,7 @@ export function NostrKeyImportForm({
     setImportError(null);
 
     try {
-      await onImport(trimmedInput);
+      await onImport(trimmedInput, isEncryptedInput ? passphrase : undefined);
     } catch (error) {
       setImportError(
         error instanceof Error ? error.message : "Couldn't import this key.",
@@ -127,7 +144,14 @@ export function NostrKeyImportForm({
     } finally {
       setIsImporting(false);
     }
-  }, [isInteractionDisabled, onImport, previewNpub, trimmedInput]);
+  }, [
+    isEncryptedInput,
+    isInteractionDisabled,
+    isValid,
+    onImport,
+    passphrase,
+    trimmedInput,
+  ]);
 
   return (
     <form
@@ -304,11 +328,56 @@ export function NostrKeyImportForm({
         </>
       )}
 
+      {isEncryptedInput ? (
+        <div
+          className={cn(
+            "space-y-1.5 text-left",
+            variant === "spotlight" && "mx-auto mt-2 w-full max-w-[420px]",
+          )}
+          data-testid="nostr-import-passphrase-section"
+        >
+          <label
+            className="text-sm font-medium text-foreground"
+            htmlFor="nostr-import-passphrase"
+          >
+            Backup passphrase
+          </label>
+          <Input
+            autoComplete="off"
+            autoCorrect="off"
+            className="h-10 bg-background"
+            data-testid="nostr-import-passphrase"
+            id="nostr-import-passphrase"
+            onChange={(event) => {
+              setPassphrase(event.target.value);
+              setImportError(null);
+            }}
+            placeholder="Passphrase"
+            spellCheck={false}
+            type="password"
+            value={passphrase}
+          />
+        </div>
+      ) : null}
+
       <div
         className={cn("min-h-8", variant === "spotlight" && "mt-6 text-center")}
         data-testid="nostr-import-feedback"
       >
-        {previewNpub ? (
+        {isEncryptedInput ? (
+          // No npub preview is possible: the pubkey lives inside the encrypted
+          // payload and is only recovered by decrypting in Rust.
+          <p
+            className={cn(
+              "flex items-center gap-1.5 text-sm text-foreground",
+              variant === "spotlight" && "justify-center",
+            )}
+            data-testid="nostr-import-encrypted-badge"
+          >
+            <KeyRound aria-hidden="true" className="h-4 w-4 shrink-0" />
+            Encrypted key backup — enter its passphrase to import
+          </p>
+        ) : previewNpub ? (
           variant === "spotlight" ? (
             // Spotlight uses the backup step's quiet caption language:
             // centered, unboxed, with the npub in the shared olive key ink.

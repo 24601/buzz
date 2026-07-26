@@ -1,0 +1,50 @@
+/**
+ * Pure-logic tests for key-import input classification (nsec vs NIP-49
+ * ncryptsec) and submit gating.
+ */
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { nsecEncode } from "nostr-tools/nip19";
+import { generateSecretKey } from "nostr-tools/pure";
+import {
+  classifyKeyImportInput,
+  isPlausibleNcryptsec,
+  keyImportSubmitEnabled,
+} from "./keyImportInput.ts";
+
+// NIP-49 spec vector — structurally valid encrypted backup.
+const NCRYPTSEC =
+  "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+
+const VALID_NSEC = nsecEncode(generateSecretKey());
+
+test("classify_by_hrp_with_whitespace_tolerance", () => {
+  assert.equal(classifyKeyImportInput(`  ${NCRYPTSEC}\n`), "ncryptsec");
+  assert.equal(classifyKeyImportInput(VALID_NSEC), "nsec");
+  assert.equal(classifyKeyImportInput("npub1whatever"), "unknown");
+  assert.equal(classifyKeyImportInput(""), "unknown");
+  // nsec must not be shadowed by the longer HRP check.
+  assert.equal(classifyKeyImportInput("nsec1"), "nsec");
+});
+
+test("plausible_ncryptsec_requires_bech32_charset", () => {
+  assert.equal(isPlausibleNcryptsec(NCRYPTSEC), true);
+  // '1' and 'b' / 'i' / 'o' are not in the bech32 charset.
+  assert.equal(isPlausibleNcryptsec("ncryptsec1bio"), false);
+  assert.equal(isPlausibleNcryptsec("ncryptsec1"), false);
+  assert.equal(isPlausibleNcryptsec("ncryptsec1 with spaces"), false);
+});
+
+test("submit_gating_nsec_path_unchanged", () => {
+  assert.equal(keyImportSubmitEnabled(VALID_NSEC, ""), true);
+  assert.equal(keyImportSubmitEnabled("nsec1garbage", ""), false);
+  assert.equal(keyImportSubmitEnabled("", ""), false);
+});
+
+test("submit_gating_ncryptsec_requires_passphrase", () => {
+  assert.equal(keyImportSubmitEnabled(NCRYPTSEC, ""), false);
+  assert.equal(keyImportSubmitEnabled(NCRYPTSEC, "hunter2hunter2"), true);
+  // Structurally implausible blob never submits, passphrase or not.
+  assert.equal(keyImportSubmitEnabled("ncryptsec1bio", "hunter2"), false);
+});

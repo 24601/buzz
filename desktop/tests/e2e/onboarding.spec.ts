@@ -621,6 +621,42 @@ test("first-launch key import continues to machine setup", async ({ page }) => {
   await expect(page.getByTestId("app-loading-gate")).toHaveCount(0);
 });
 
+test("first-launch encrypted backup import asks for a passphrase and continues", async ({
+  page,
+}) => {
+  await installMockBridge(page, undefined, {
+    skipCommunitySeed: true,
+    skipOnboardingSeed: true,
+  });
+  await page.goto("/");
+
+  await page.getByRole("button", { name: "Use an existing key" }).click();
+  // Spec-vector blob the mock bridge accepts with the mock passphrase.
+  const mockNcryptsec =
+    "ncryptsec1qgg9947rlpvqu76pj5ecreduf9jxhselq2nae2kghhvd5g7dgjtcxfqtd67p9m0w57lspw8gsq6yphnm8623nsl8xn9j4jdzz84zm3frztj3z7s35vpzmqf6ksu8r89qk5z2zxfmu5gv8th8wclt0h4p";
+  await page.getByTestId("nostr-import-nsec-input").fill(mockNcryptsec);
+
+  // No npub preview is possible; the form switches to encrypted mode and
+  // requires a passphrase before submit unlocks.
+  await expect(page.getByTestId("nostr-import-encrypted-badge")).toBeVisible();
+  await expect(page.getByTestId("nostr-import-submit")).toBeDisabled();
+
+  // Wrong passphrase surfaces the decrypt error and stays on the form.
+  await page.getByTestId("nostr-import-passphrase").fill("wrong passphrase");
+  await page.getByTestId("nostr-import-submit").click();
+  await expect(page.getByTestId("nostr-import-feedback")).toContainText(
+    /wrong passphrase/i,
+  );
+
+  await page
+    .getByTestId("nostr-import-passphrase")
+    .fill("mock horse battery staple lake orbit");
+  await page.getByTestId("nostr-import-submit").click();
+
+  await expect(page.getByTestId("onboarding-page-2")).toBeVisible();
+  await expect(page.getByTestId("machine-onboarding-gate")).toBeVisible();
+});
+
 test("non-local runtime override keeps community selection without release flag", async ({
   page,
 }) => {
