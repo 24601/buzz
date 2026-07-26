@@ -25,14 +25,20 @@
 
 /// Bech32 HRP of NIP-49 encrypted secret keys.
 const NCRYPTSEC_PREFIX: &str = "ncryptsec1";
+/// Bech32 also permits an ALL-UPPERCASE encoding of the same payload
+/// (BIP-173); an uppercased valid backup decodes identically, so the guard
+/// must reject it too. Mixed case is invalid bech32 and cannot decode — a
+/// substring matching either all-lower or all-upper prefix covers every
+/// decodable form.
+const NCRYPTSEC_PREFIX_UPPER: &str = "NCRYPTSEC1";
 
 /// Reject `text` if it contains NIP-49 key-backup material.
 ///
-/// Returns `Err` when an `ncryptsec1…` substring is present. Callers MUST
-/// abort the network operation on `Err` — this is a fail-closed guard, not a
-/// warning.
+/// Returns `Err` when an `ncryptsec1…` (or uppercase `NCRYPTSEC1…`)
+/// substring is present. Callers MUST abort the network operation on `Err` —
+/// this is a fail-closed guard, not a warning.
 pub fn assert_no_key_backup(text: &str, context: &'static str) -> Result<(), String> {
-    if text.contains(NCRYPTSEC_PREFIX) {
+    if text.contains(NCRYPTSEC_PREFIX) || text.contains(NCRYPTSEC_PREFIX_UPPER) {
         return Err(format!(
             "blocked {context}: payload contains NIP-49 key-backup material \
              (ncryptsec); the local key backup must never be transmitted to a relay"

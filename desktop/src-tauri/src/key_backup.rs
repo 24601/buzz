@@ -107,9 +107,18 @@ pub fn decrypt_ncryptsec(input: &str, password: &str) -> Result<Keys, String> {
 /// Recover identity keys from an import input: `ncryptsec1…` (requires the
 /// passphrase, decrypted in Rust) or anything `Keys::parse` accepts (raw
 /// `nsec1…`/hex — byte-for-byte the pre-NIP-49 path).
+///
+/// Classification is case-insensitive on the HRP: bech32 permits an
+/// ALL-UPPERCASE encoding, so `NCRYPTSEC1…` routes to the encrypted path
+/// (where the bech32 decoder accepts it); mixed case routes there too and
+/// fails parsing with the accurate "invalid ncryptsec" error rather than
+/// falling through to the raw-key parser.
 pub fn recover_keys_from_input(input: &str, password: Option<&str>) -> Result<Keys, String> {
     let trimmed = input.trim();
-    if trimmed.starts_with(NCRYPTSEC_HRP) {
+    let hrp_match = trimmed
+        .get(..NCRYPTSEC_HRP.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(NCRYPTSEC_HRP));
+    if hrp_match {
         let password =
             password.ok_or_else(|| "encrypted backup requires a passphrase".to_string())?;
         decrypt_ncryptsec(trimmed, password)

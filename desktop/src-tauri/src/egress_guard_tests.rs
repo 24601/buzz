@@ -24,6 +24,19 @@ fn rejects_ncryptsec_anywhere_in_text() {
     );
 }
 
+/// Bech32 permits an all-uppercase encoding of the same payload — an
+/// uppercased valid backup must not bypass the guard (text and bytes).
+/// Mixed case is invalid bech32 (cannot decode) and is deliberately not
+/// blocked.
+#[test]
+fn rejects_uppercase_ncryptsec() {
+    let upper = NCRYPTSEC.to_ascii_uppercase();
+    assert_guard_error(&assert_no_key_backup(&upper, "test").unwrap_err());
+    assert_guard_error(&assert_no_key_backup_bytes(upper.as_bytes(), "test").unwrap_err());
+    // Mixed case cannot decode; not blocked.
+    assert!(assert_no_key_backup("nCrYpTsEc1qgg9947r", "test").is_ok());
+}
+
 #[test]
 fn passes_clean_payloads_including_raw_nsec() {
     assert!(assert_no_key_backup("hello world", "test").is_ok());
@@ -207,52 +220,171 @@ fn src_rust_files() -> Vec<std::path::PathBuf> {
     out
 }
 
-/// Inventory completeness: every `/events` URL-construction site in
-/// `desktop/src-tauri/src` must be in the guarded set. A future ninth
-/// submission path fails this test until its guard is wired and it is added
-/// to the allowlist below (with its egress_guard.rs table row + injection
-/// test).
-#[test]
-fn events_url_inventory_is_fully_guarded() {
-    // (file suffix, guarded construction sites expected in that file)
-    let allowlist: &[&str] = &[
-        "src/relay.rs",                             // boundaries 2, 3, 4
-        "src/relay/submit.rs",                      // boundary 1
-        "src/huddle/pipeline.rs",                   // boundary 5
-        "src/commands/team_snapshot.rs",            // boundary 6
-        "src/commands/personas/snapshot/import.rs", // boundary 7
-        // test-only relay stubs / fixtures (no production egress):
-        "src/relay_admission.rs",
-        "src/archive/mod_tests.rs",
-        "src/managed_agents/persona_events/tests.rs",
-        "src/commands/team_snapshot/tests.rs",
-        "src/egress_guard_tests.rs",
-    ];
+/// Site-granular `/events` inventory: `(file suffix, expected non-comment
+/// `/events` occurrences, expected guard call sites — full-path calls into
+/// the egress-guard module)`.
+///
+/// Every entry pairs the URL-construction count with the guard-call count for
+/// that file, so BOTH of these fail the scan (not just a brand-new file):
+///   - adding an unguarded ninth `/events` site inside an already-listed file
+///     (count goes up without a matching table update), and
+///   - removing/refactoring away a guard call while its egress site remains.
+///
+/// Updating a row here is the deliberate act that must accompany wiring the
+/// guard + adding an injection test for the new site.
+const EVENTS_INVENTORY: &[(&str, usize, usize)] = &[
+    // Production egress boundaries (see egress_guard.rs table):
+    ("src/relay.rs", 3, 3),                             // boundaries 2, 3, 4
+    ("src/relay/submit.rs", 1, 1),                      // boundary 1
+    ("src/huddle/pipeline.rs", 1, 1),                   // boundary 5
+    ("src/commands/team_snapshot.rs", 1, 1),            // boundary 6
+    ("src/commands/personas/snapshot/import.rs", 2, 1), // boundary 7 + its in-file injection-test fixture URL
+    ("src/native_websocket.rs", 0, 2),                  // boundary 8 (WS frames; no events URL)
+    // Test-only fixtures — no production egress, no guard:
+    ("src/relay_admission.rs", 1, 0),
+    ("src/archive/mod_tests.rs", 1, 0),
+    ("src/managed_agents/persona_events/tests.rs", 1, 0),
+    ("src/commands/team_snapshot/tests.rs", 1, 0),
+];
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+// Needles are assembled at runtime so this scan file itself contains no
+// contiguous match and needs no self-referential inventory row.
+fn events_needle() -> String {
+    ["/ev", "ents"].concat()
+}
+fn guard_needle() -> String {
+    ["egress_guard::", "assert_no_key_backup"].concat()
+}
+
+/// Pure scan core over `(relative path, content)` pairs. Returns violations;
+/// empty means every file matches its inventory row exactly (files absent
+/// from the table are expected to have zero `/events` sites and zero guard
+/// calls).
+fn events_inventory_violations(files: &[(String, String)]) -> Vec<String> {
+    let events = events_needle();
+    let guard = guard_needle();
     let mut violations = Vec::new();
-    for path in src_rust_files() {
-        let rel = path
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
-        let content = std::fs::read_to_string(&path).unwrap();
+
+    for (rel, content) in files {
+        let expected = EVENTS_INVENTORY
+            .iter()
+            .find(|(suffix, _, _)| rel.ends_with(suffix))
+            .map(|&(_, e, g)| (e, g))
+            .unwrap_or((0, 0));
+
+        let mut event_sites = Vec::new();
         for (i, line) in content.lines().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
+            if line.trim_start().starts_with("//") {
                 continue; // doc/comment mentions
             }
-            if line.contains("/events") && !allowlist.iter().any(|a| rel.ends_with(a)) {
-                violations.push(format!("{rel}:{}: {}", i + 1, line.trim()));
+            if line.contains(&events) {
+                event_sites.push(format!("  {rel}:{}: {}", i + 1, line.trim()));
             }
         }
+        let guard_count = content.matches(&guard).count();
+
+        if (event_sites.len(), guard_count) != expected {
+            violations.push(format!(
+                "{rel}: found {} events-URL site(s) + {} guard call(s), inventory \
+                 expects {} + {}. Sites found:\n{}",
+                event_sites.len(),
+                guard_count,
+                expected.0,
+                expected.1,
+                if event_sites.is_empty() {
+                    "  (none)".to_string()
+                } else {
+                    event_sites.join("\n")
+                },
+            ));
+        }
     }
+    violations
+}
+
+fn read_src_files() -> Vec<(String, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    src_rust_files()
+        .into_iter()
+        .map(|path| {
+            let rel = path
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            let content = std::fs::read_to_string(&path).unwrap();
+            (rel, content)
+        })
+        .collect()
+}
+
+/// Inventory completeness: every `/events` URL-construction site in
+/// `desktop/src-tauri/src` must match the site-granular inventory above. A
+/// future ninth submission path — in a NEW file or an ALREADY-LISTED one —
+/// fails this test until its guard is wired, its injection test exists, and
+/// its inventory row is updated.
+#[test]
+fn events_url_inventory_is_fully_guarded() {
+    let violations = events_inventory_violations(&read_src_files());
     assert!(
         violations.is_empty(),
-        "new `/events` egress site(s) outside the guarded inventory — wire \
-         crate::egress_guard and add an injection test before allowlisting:\n{}",
+        "events-URL egress inventory drift — wire crate::egress_guard, add an \
+         injection test, then update EVENTS_INVENTORY:\n{}",
         violations.join("\n")
+    );
+}
+
+/// Mutation-style proof of the tripwire's guarantee: an unguarded ninth
+/// `/events` site added to an already-inventoried file (relay.rs) is caught.
+#[test]
+fn inventory_scan_catches_new_site_in_allowlisted_file() {
+    let mut files = read_src_files();
+    let relay = files
+        .iter_mut()
+        .find(|(rel, _)| rel.ends_with("src/relay.rs"))
+        .expect("relay.rs must be in the scan set");
+    relay.1.push_str(&format!(
+        "\nfn sneaky_ninth_site(base: &str) -> String {{ format!(\"{{base}}{}\") }}\n",
+        events_needle()
+    ));
+    let violations = events_inventory_violations(&files);
+    assert!(
+        violations.iter().any(|v| v.contains("src/relay.rs")),
+        "an unguarded ninth events-URL site in relay.rs must trip the scan: {violations:?}"
+    );
+}
+
+/// The pairing also fires in reverse: a guard call deleted while its egress
+/// site remains is caught.
+#[test]
+fn inventory_scan_catches_removed_guard_call() {
+    let mut files = read_src_files();
+    let relay = files
+        .iter_mut()
+        .find(|(rel, _)| rel.ends_with("src/relay.rs"))
+        .expect("relay.rs must be in the scan set");
+    relay.1 = relay.1.replacen(&guard_needle(), "removed_guard", 1);
+    let violations = events_inventory_violations(&files);
+    assert!(
+        violations.iter().any(|v| v.contains("src/relay.rs")),
+        "a removed guard call in relay.rs must trip the scan: {violations:?}"
+    );
+}
+
+/// A brand-new file with an `/events` site (no inventory row) is caught.
+#[test]
+fn inventory_scan_catches_new_unlisted_file() {
+    let mut files = read_src_files();
+    files.push((
+        "src/brand_new_egress.rs".to_string(),
+        format!("let url = format!(\"{{}}{}\", base);", events_needle()),
+    ));
+    let violations = events_inventory_violations(&files);
+    assert!(
+        violations
+            .iter()
+            .any(|v| v.contains("src/brand_new_egress.rs")),
+        "{violations:?}"
     );
 }
 

@@ -326,35 +326,14 @@ pub async fn import_identity(
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
         let key_path = data_dir.join("identity.key");
 
-        // Importing a different identity invalidates the app-managed backup:
-        // it encrypts the previous key and must not linger mislabeled.
-        let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
-        crate::key_backup::cleanup_stale_backup(&previous_pubkey, &keys.public_key(), &data_dir)?;
-
-        // Persist into the OS keyring first (store → read-back verify → marker →
-        // delete file). Falls back to the 0o600 file when the keyring is
-        // unavailable; returns Err only when both backends fail.
-        let store = crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
-        crate::app_state::persist_imported_identity(store, &keys, &key_path, &data_dir)?;
-
-        // Update in-memory keys BEFORE clearing recovery flags. The Release
-        // stores below pair with Acquire loads in get_identity: a reader
-        // observing false is guaranteed to see the updated keys.
-        let pubkey = keys.public_key();
-        *state.keys.lock().map_err(|e| e.to_string())? = keys;
-
-        // Clear both recovery flags — an import is valid in either lost or
-        // keyring-locked state and resolves both. In the locked case the
-        // keyring is unreachable, so persist_imported_identity already fell
-        // back to identity.key; on the next Unreachable boot the file is
-        // loaded directly and when the keyring returns the adoption path
-        // picks it up.
-        state
-            .identity_lost
-            .store(false, std::sync::atomic::Ordering::Release);
-        state
-            .keyring_locked
-            .store(false, std::sync::atomic::Ordering::Release);
+        let pubkey = commit_imported_identity(&state, &data_dir, keys, |keys| {
+            // Persist into the OS keyring first (store → read-back verify →
+            // marker → delete file). Falls back to the 0o600 file when the
+            // keyring is unavailable; returns Err only when both backends fail.
+            let store =
+                crate::secret_store::SecretStore::shared(crate::app_state::keyring_service());
+            crate::app_state::persist_imported_identity(store, keys, &key_path, &data_dir)
+        })?;
 
         let pubkey_hex = pubkey.to_hex();
         let display_name = truncated_display_name(&pubkey)?;
@@ -371,6 +350,65 @@ pub async fn import_identity(
     })
     .await
     .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Commit an imported identity: durably persist, swap in-memory keys, clear
+/// recovery flags, then remove the previous identity's stale app-managed
+/// backup. Caller must hold `state.identity_mutation`.
+///
+/// Ordering is the contract:
+///
+/// 1. `persist` runs FIRST. If it fails (`Err` from both keyring and file
+///    fallback), nothing has changed — the previous identity stays live in
+///    memory AND its valid canonical `identity.ncryptsec` stays on disk.
+/// 2. Only after durable persistence do we swap `state.keys` and clear the
+///    recovery flags.
+/// 3. Stale-backup cleanup runs LAST and is deliberately best-effort: at that
+///    point the import is durably committed, so reporting a cleanup failure
+///    as a command `Err` would claim a half-applied import that actually
+///    succeeded. The leftover blob is still passphrase-encrypted and is
+///    replaced by the next backup creation; we log and move on.
+fn commit_imported_identity(
+    state: &AppState,
+    data_dir: &std::path::Path,
+    keys: nostr::Keys,
+    persist: impl FnOnce(&nostr::Keys) -> Result<(), String>,
+) -> Result<nostr::PublicKey, String> {
+    // Capture the previous pubkey up front for post-commit cleanup.
+    let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+
+    persist(&keys)?;
+
+    // Update in-memory keys BEFORE clearing recovery flags. The Release
+    // stores below pair with Acquire loads in get_identity: a reader
+    // observing false is guaranteed to see the updated keys.
+    let pubkey = keys.public_key();
+    *state.keys.lock().map_err(|e| e.to_string())? = keys;
+
+    // Clear both recovery flags — an import is valid in either lost or
+    // keyring-locked state and resolves both. In the locked case the
+    // keyring is unreachable, so the persist step already fell back to
+    // identity.key; on the next Unreachable boot the file is loaded
+    // directly and when the keyring returns the adoption path picks it up.
+    state
+        .identity_lost
+        .store(false, std::sync::atomic::Ordering::Release);
+    state
+        .keyring_locked
+        .store(false, std::sync::atomic::Ordering::Release);
+
+    // Importing a different identity invalidates the app-managed backup: it
+    // encrypts the previous key and must not linger mislabeled. Best-effort
+    // per the ordering contract above.
+    if let Err(e) = crate::key_backup::cleanup_stale_backup(&previous_pubkey, &pubkey, data_dir) {
+        eprintln!(
+            "buzz-desktop: import committed, but stale key backup cleanup failed: {e}; \
+             the leftover identity.ncryptsec encrypts the PREVIOUS key and will be \
+             replaced by the next backup creation"
+        );
+    }
+
+    Ok(pubkey)
 }
 
 /// Make the current ephemeral identity durable by persisting it to the OS
@@ -796,6 +834,82 @@ mod key_backup_command_tests {
             "locked keyring must not be backed up"
         );
         assert!(!crate::key_backup::backup_file_path(dir.path()).exists());
+    }
+
+    /// Blocker-1 regression (Wren, implementation review): a failed
+    /// different-key import must leave BOTH the old in-memory identity and
+    /// the old canonical backup intact. Persistence runs before cleanup, so
+    /// an `Err` from persist means nothing was mutated or deleted.
+    #[test]
+    fn failed_import_persistence_preserves_old_identity_and_backup() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let old_pubkey = state.keys.lock().unwrap().public_key();
+
+        // A valid canonical backup for the live (old) identity.
+        create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).unwrap();
+        let backup_path = crate::key_backup::backup_file_path(dir.path());
+        let backup_before = std::fs::read_to_string(&backup_path).unwrap();
+
+        // Different-key import whose durable persistence fails (both
+        // keyring and file fallback down).
+        let _guard = state.identity_mutation.lock().unwrap();
+        let err = super::commit_imported_identity(&state, dir.path(), Keys::generate(), |_| {
+            Err("keyring and file both unavailable".to_string())
+        })
+        .unwrap_err();
+        assert!(err.contains("unavailable"), "{err}");
+
+        // Old identity still live; old backup untouched byte-for-byte.
+        assert_eq!(state.keys.lock().unwrap().public_key(), old_pubkey);
+        assert_eq!(
+            std::fs::read_to_string(&backup_path).unwrap(),
+            backup_before
+        );
+        assert!(
+            crate::key_backup::decrypt_ncryptsec(&backup_before, PASSWORD)
+                .unwrap()
+                .public_key()
+                == old_pubkey,
+            "surviving backup must still recover the still-live identity"
+        );
+    }
+
+    /// Successful different-key import removes the previous identity's
+    /// backup — cleanup runs after the durable commit, not before.
+    #[test]
+    fn successful_import_removes_stale_backup_after_commit() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+
+        create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).unwrap();
+        let backup_path = crate::key_backup::backup_file_path(dir.path());
+        assert!(backup_path.exists());
+
+        let new_keys = Keys::generate();
+        let backup_present_at_persist = std::cell::Cell::new(false);
+        let _guard = state.identity_mutation.lock().unwrap();
+        let pubkey = super::commit_imported_identity(&state, dir.path(), new_keys.clone(), |_| {
+            // Ordering probe: the old backup must still exist while
+            // persistence is running (cleanup has not happened yet).
+            backup_present_at_persist.set(backup_path.exists());
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(
+            backup_present_at_persist.get(),
+            "cleanup must not precede persist"
+        );
+        assert_eq!(pubkey, new_keys.public_key());
+        assert_eq!(
+            state.keys.lock().unwrap().public_key(),
+            new_keys.public_key()
+        );
+        assert!(
+            !backup_path.exists(),
+            "stale backup must be removed post-commit"
+        );
     }
 
     /// Concurrent identity swap vs backup creation: `identity_mutation`

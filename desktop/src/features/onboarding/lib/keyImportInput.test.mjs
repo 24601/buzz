@@ -28,6 +28,22 @@ test("classify_by_hrp_with_whitespace_tolerance", () => {
   assert.equal(classifyKeyImportInput("nsec1"), "nsec");
 });
 
+test("uppercase_bech32_encoding_classifies_and_gates_like_lowercase", () => {
+  // Bech32 permits an all-uppercase encoding; it must route to the
+  // encrypted path (matching Rust) and be submit-plausible.
+  const upper = NCRYPTSEC.toUpperCase();
+  assert.equal(classifyKeyImportInput(upper), "ncryptsec");
+  assert.equal(isPlausibleNcryptsec(upper), true);
+  assert.equal(keyImportSubmitEnabled(upper, ""), false);
+  assert.equal(keyImportSubmitEnabled(upper, "hunter2hunter2"), true);
+  // Mixed case: routed encrypted (Rust reports the accurate error) but
+  // never plausible/submittable — mixed-case bech32 cannot decode.
+  const mixed = `N${NCRYPTSEC.slice(1)}`;
+  assert.equal(classifyKeyImportInput(mixed), "ncryptsec");
+  assert.equal(isPlausibleNcryptsec(mixed), false);
+  assert.equal(keyImportSubmitEnabled(mixed, "hunter2hunter2"), false);
+});
+
 test("plausible_ncryptsec_requires_bech32_charset", () => {
   assert.equal(isPlausibleNcryptsec(NCRYPTSEC), true);
   // '1' and 'b' / 'i' / 'o' are not in the bech32 charset.

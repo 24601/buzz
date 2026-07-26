@@ -12,12 +12,20 @@ import { nsecToNpub } from "@/shared/lib/nostrUtils";
 
 export type KeyImportKind = "nsec" | "ncryptsec" | "unknown";
 
-/** Bech32 charset after the `ncryptsec1` HRP; anything else can't decode. */
-const NCRYPTSEC_SHAPE = /^ncryptsec1[02-9ac-hj-np-z]{10,}$/;
+/**
+ * Bech32 charset after the `ncryptsec1` HRP; anything else can't decode.
+ * Bech32 also permits an ALL-UPPERCASE encoding of the same payload, so both
+ * casings are plausible (mixed case is invalid and stays implausible).
+ */
+const NCRYPTSEC_SHAPE =
+  /^(?:ncryptsec1[02-9ac-hj-np-z]{10,}|NCRYPTSEC1[02-9AC-HJ-NP-Z]{10,})$/;
 
 export function classifyKeyImportInput(input: string): KeyImportKind {
   const trimmed = input.trim();
-  if (trimmed.startsWith("ncryptsec1")) return "ncryptsec";
+  // Case-insensitive on the HRP to match the Rust classifier: an uppercase
+  // valid backup routes to the encrypted path (and decodes there); mixed
+  // case routes there too and fails in Rust with the accurate error.
+  if (trimmed.slice(0, 10).toLowerCase() === "ncryptsec1") return "ncryptsec";
   if (trimmed.startsWith("nsec1")) return "nsec";
   return "unknown";
 }

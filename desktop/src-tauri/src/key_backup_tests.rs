@@ -99,6 +99,28 @@ fn recover_keys_ncryptsec_wrong_password() {
     assert_eq!(err, "wrong passphrase or corrupted backup");
 }
 
+/// Bech32 permits an all-uppercase encoding: `NCRYPTSEC1…` must classify as
+/// an encrypted backup (matching the egress guard's blocking scope), never
+/// fall through to the raw-key parser. Mixed case classifies encrypted too
+/// and fails with the accurate ncryptsec error, not "Invalid private key".
+#[test]
+fn recover_keys_uppercase_ncryptsec_classifies_as_encrypted() {
+    let upper = SPEC_NCRYPTSEC.to_ascii_uppercase();
+    // Routing proof: encrypted path demands a passphrase.
+    let err = recover_keys_from_input(&upper, None).unwrap_err();
+    assert_eq!(err, "encrypted backup requires a passphrase");
+    // With the passphrase, the bech32 decoder accepts the uppercase form.
+    let keys = recover_keys_from_input(&upper, Some("nostr")).unwrap();
+    assert_eq!(keys.secret_key().to_secret_hex(), SPEC_SECRET_HEX);
+
+    // Mixed case: still routed to the encrypted path, rejected as invalid
+    // ncryptsec (mixed-case bech32 cannot decode).
+    let mut mixed = SPEC_NCRYPTSEC.to_string();
+    mixed.replace_range(0..1, "N");
+    let err = recover_keys_from_input(&mixed, Some("nostr")).unwrap_err();
+    assert!(err.contains("invalid ncryptsec"), "{err}");
+}
+
 #[test]
 fn recover_keys_raw_nsec_path_unchanged() {
     let keys = Keys::generate();
