@@ -573,3 +573,91 @@ just mobile-dev
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+---
+
+## Cursor Cloud specific instructions
+
+Notes for cloud agents. The VM snapshot already has the toolchain (via Hermit)
+and these system packages installed: Docker, native PostgreSQL 16, Redis 7,
+the MinIO server + `mc` client, `libssl-dev`/`pkg-config` (needed for
+`openssl-sys` when running the full `just clippy`), `jq`, and the Playwright
+Chromium browser. The startup update script only refreshes JS deps
+(`./bin/pnpm install`); everything below (starting services, migrations) is
+**not** automated — start it yourself each session.
+
+### Docker limitation — DO NOT use `docker compose` for backing services
+
+This VM's cgroup root is a permanent `domain threaded` root, so containers that
+need domain controllers (`memory`/`io`) cannot start — `docker compose up`
+fails with `cannot enter cgroupv2 "/sys/fs/cgroup/docker" ... threaded mode`.
+`docker run hello-world` works, but Postgres/Redis/MinIO/Keycloak/etc. do not.
+
+Consequence: `just setup`, `just relay`, `just test`, and anything depending on
+`_ensure-services` will hang ~2min then fail at the Docker step. **Run the
+underlying services natively and invoke `cargo`/`buzz` directly instead.**
+
+### Start backing services natively (run once per VM boot)
+
+There is no systemd, so start each process manually:
+
+```bash
+sudo redis-server --daemonize yes --dir /var/lib/redis
+sudo pg_ctlcluster 16 main start                     # Postgres 16 on :5432
+MINIO_ROOT_USER=buzz_dev MINIO_ROOT_PASSWORD=buzz_dev_secret \
+  minio server /var/lib/minio-data --console-address ":9001" &   # S3 on :9000
+```
+
+The `buzz` Postgres role/db (`postgres://buzz:buzz_dev@localhost:5432/buzz`)
+and the `buzz-media` MinIO bucket already exist in the snapshot; recreate them
+only if missing (role: `CREATE ROLE buzz LOGIN PASSWORD 'buzz_dev' SUPERUSER;`
++ `createdb -O buzz buzz`; bucket: `mc alias set local http://localhost:9000
+buzz_dev buzz_dev_secret && mc mb --ignore-existing local/buzz-media`).
+
+MinIO on `:9000` is **required for relay startup** — the relay runs a git
+object-store conformance probe (A3 gate) at boot and exits if S3 is
+unreachable. (`BUZZ_GIT_CONFORMANCE_PROBE=false` skips the probe but media/git
+still need S3 at runtime.)
+
+### Run the relay + migrations directly
+
+The binaries read config from the environment (no dotenv autoload), so source
+`.env` first. Hermit's `bin/` symlinks work without activation.
+
+```bash
+set -a && . ./.env && set +a
+cargo run -p buzz-admin -- migrate      # idempotent; skips applied migrations
+./scripts/seed-local-community.sh       # seeds localhost:3000 community (idempotent)
+cargo run -p buzz-relay                 # ws/http on :3000; /health returns "ok"
+```
+
+### CLI smoke test (dev auth)
+
+`.env` has `BUZZ_REQUIRE_AUTH_TOKEN=false`, so any Nostr key works and relay
+membership is not required. `buzz-admin` in this version has no `mint-token`
+(TESTING.md is stale) — use `buzz-admin generate-key` for a keypair.
+
+```bash
+cargo build -p buzz-cli                 # -> ./target/debug/buzz
+export BUZZ_RELAY_URL=http://localhost:3000
+export BUZZ_PRIVATE_KEY=<64-hex secret from `buzz-admin generate-key`>
+CH=$(./target/debug/buzz channels create --name demo --type stream \
+       --visibility open | jq -r .channel_id)
+./target/debug/buzz messages send --channel "$CH" --content "hello"
+./target/debug/buzz messages get --channel "$CH" | jq .
+```
+
+### Lint / test / desktop
+
+- Lint gate works normally: `just fmt-check` and `just clippy` both pass
+  (clippy needs `libssl-dev`, already installed).
+- `just test-unit` passes except one pre-existing, clock-dependent flake,
+  `buzz-db replica_fence::tests::fence_starts_closed_and_opens_on_advance`
+  (asserts a microsecond-truncated timestamp equals a nanosecond clock value;
+  fails on any host whose clock has sub-µs nanoseconds — unrelated to setup).
+- `just test` (integration/E2E) needs the native services above running, not
+  Docker.
+- Desktop renders headlessly via the mock bridge: `just desktop-typecheck`,
+  `just desktop-build`, and `just desktop-screenshot --name home` all work
+  (Chromium is pre-installed). `just dev` (native Tauri shell) needs a display
+  and is not usable here.
