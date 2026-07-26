@@ -1607,10 +1607,18 @@ fn deleted_harness_summary_display_and_spawn_sentence_agree() {
 /// therefore preserves existing env vars rather than silently erasing them.
 #[test]
 fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
+    use crate::managed_agents::custom_harnesses::registry_test_lock;
     use crate::managed_agents::discovery::discover_acp_runtimes_from;
     use std::{collections::BTreeMap, fs};
     use tempfile::tempdir;
 
+    // Discovery's auth probes read/warm the process-global PATH and
+    // login-shell-PATH caches, and its final step publishes to the global
+    // harness registry — hold both guards so parallel tests (e.g. the
+    // PATH-swapping resolution tests) can't observe or absorb torn state.
+    // Lock order for tests that need both: path lock first, then registry.
+    let _path_guard = crate::managed_agents::lock_path_mutex();
+    let _lock = registry_test_lock();
     let dir = tempdir().unwrap();
     // Write a custom definition with two env vars.
     fs::write(
@@ -1648,8 +1656,13 @@ fn custom_catalog_entry_carries_definition_env_for_edit_roundtrip() {
 /// is handled via the `KnownAcpRuntime` metadata path, not user-editable JSON.
 #[test]
 fn builtin_catalog_entry_has_empty_definition_env() {
+    use crate::managed_agents::custom_harnesses::registry_test_lock;
     use crate::managed_agents::discovery::discover_acp_runtimes_from;
 
+    // Same guards as above: discovery probes PATH-dependent caches and
+    // publishes to the global registry.
+    let _path_guard = crate::managed_agents::lock_path_mutex();
+    let _lock = registry_test_lock();
     let entries = discover_acp_runtimes_from(None);
     // Find any builtin entry (e.g. "goose" or "claude").
     let builtin = entries
@@ -1716,6 +1729,9 @@ fn discovery_publish_path_survives_mid_flight_save() {
     };
     use crate::managed_agents::discovery::discover_acp_runtimes_from;
 
+    // Path lock first, then registry — discovery's probes touch the global
+    // PATH caches (see the definition_env tests above for the full rationale).
+    let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
     let dir = tempfile::tempdir().unwrap();
 
@@ -1746,6 +1762,8 @@ fn discovery_publish_path_drops_mid_flight_delete() {
     };
     use crate::managed_agents::discovery::discover_acp_runtimes_from;
 
+    // Path lock first, then registry (same rationale as the sibling test).
+    let _path_guard = crate::managed_agents::lock_path_mutex();
     let _lock = registry_test_lock();
     let dir = tempfile::tempdir().unwrap();
 

@@ -709,9 +709,14 @@ fn grandchild_inherits_pgid_of_process_group_leader() {
     // be reaped before `getpgid(harness_pid)` runs (observed flake —
     // getpgid returned -1). The group is killed in cleanup, so the sleep
     // never runs to term.
+    //
+    // `/bin/sh` (absolute) rather than `sh`: parallel tests holding
+    // `lock_path_mutex` legitimately swap PATH to a tempdir, and this test
+    // doesn't need the lock — but a PATH lookup during the swap window
+    // fails with NotFound (observed flake).
     let mut harness = {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "sh -c 'sleep 10 & echo $!' & wait $!; sleep 10"])
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", "/bin/sh -c 'sleep 10 & echo $!' & wait $!; sleep 10"])
             .stdout(std::process::Stdio::piped())
             .process_group(0);
         cmd.spawn().expect("spawn harness")

@@ -59,6 +59,28 @@ const OPENCLAW_NOT_INSTALLED = {
   source: "preset",
 } as const;
 
+/** Cursor preset — deliberately has NO bundled logo (brand assets not
+ * licensed for redistribution; see FALLBACK_ONLY_PRESETS). Must render the
+ * terminal glyph, never initials. */
+const CURSOR_AVAILABLE = {
+  id: "cursor",
+  label: "Cursor",
+  avatar_url: "",
+  availability: "available",
+  command: "cursor-agent",
+  binary_path: "/usr/local/bin/cursor-agent",
+  default_args: [],
+  mcp_command: null,
+  install_hint: "Install Cursor CLI from cursor.com.",
+  install_instructions_url: "https://cursor.com/cli",
+  can_auto_install: false,
+  requires_external_cli: true,
+  underlying_cli_path: null,
+  node_required: false,
+  auth_status: { status: "unknown" },
+  source: "preset",
+} as const;
+
 /** Custom harness entry already persisted — shown in the custom list. */
 function makeCustomEntry(
   overrides: {
@@ -177,7 +199,11 @@ test("Agent runtimes rows render bundled preset logos, not initials", async ({
   page,
 }) => {
   await installMockBridge(page, {
-    acpRuntimesCatalog: [HERMES_AVAILABLE, OPENCLAW_NOT_INSTALLED],
+    acpRuntimesCatalog: [
+      HERMES_AVAILABLE,
+      OPENCLAW_NOT_INSTALLED,
+      CURSOR_AVAILABLE,
+    ],
   });
   await openHarnessSettings(page);
 
@@ -192,6 +218,14 @@ test("Agent runtimes rows render bundled preset logos, not initials", async ({
     await expect(logo).toBeVisible();
     await expect(logo.locator("img")).toHaveAttribute("src", file);
   }
+
+  // Cursor has no bundled logo (licensing) — it must fall through to
+  // RuntimeIcon's terminal glyph like the preset gallery, not initials.
+  const cursorLogo = page.getByTestId("doctor-runtime-logo-cursor");
+  await expect(cursorLogo).toBeVisible();
+  await expect(cursorLogo.locator("svg")).toBeVisible();
+  await expect(cursorLogo.locator("img")).not.toBeVisible();
+  await expect(cursorLogo).not.toContainText("C");
 });
 
 // ── Custom harness add ────────────────────────────────────────────────────────

@@ -390,7 +390,9 @@ const overrides = new Map([
   // discovery_publish_path_survives_mid_flight_save / _drops_mid_flight_delete
   // drive the real discover_acp_runtimes_from with a save/delete landed via the
   // pre_publish_test_hook; verified to red under a stale-publish mutant.
-  ["src-tauri/src/managed_agents/discovery/tests.rs", 1769],
+  // +18: flake fix — lock_path_mutex + registry_test_lock guards (with lock-
+  // order comments) on the four tests that drive discovery's global caches.
+  ["src-tauri/src/managed_agents/discovery/tests.rs", 1787],
   // identity-import-keyring: the identity resolution state machine's behavioral
   // matrix (46 tests over FakeIdentityStore — probe × marker × file cells,
   // adoption / read-back-corruption / marker-failure arms, recovery-mode

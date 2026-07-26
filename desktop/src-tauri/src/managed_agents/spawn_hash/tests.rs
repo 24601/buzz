@@ -470,10 +470,16 @@ fn effective_spawn_prompt_matches_hash_semantics() {
 /// spawn_config_hash used only record.agent_args.
 #[test]
 fn spawn_hash_changes_when_definition_default_args_change() {
-    use crate::managed_agents::custom_harnesses::warm_harness_registry_from_dir;
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
     use std::fs;
     use tempfile::tempdir;
 
+    // The loaded-harness registry is process-global: a parallel test re-warming
+    // it between the two hash computations makes both resolve to no-definition
+    // and h1 == h2 (observed on Windows CI).
+    let _lock = registry_test_lock();
     let dir = tempdir().unwrap();
 
     // Write v1 definition (args: ["--mode", "v1"]).
@@ -510,10 +516,14 @@ fn spawn_hash_changes_when_definition_default_args_change() {
 /// proves resolve_effective_agent_env includes definition env in the layering.
 #[test]
 fn spawn_hash_changes_when_definition_env_changes() {
-    use crate::managed_agents::custom_harnesses::warm_harness_registry_from_dir;
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
     use std::fs;
     use tempfile::tempdir;
 
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
     let dir = tempdir().unwrap();
 
     // Write definition without env.
@@ -547,10 +557,14 @@ fn spawn_hash_changes_when_definition_env_changes() {
 /// that has the same effective args from either source.
 #[test]
 fn spawn_hash_instance_args_win_over_definition_args() {
-    use crate::managed_agents::custom_harnesses::warm_harness_registry_from_dir;
+    use crate::managed_agents::custom_harnesses::{
+        registry_test_lock, warm_harness_registry_from_dir,
+    };
     use std::fs;
     use tempfile::tempdir;
 
+    // Serialize against parallel registry re-warms (see the args test above).
+    let _lock = registry_test_lock();
     let dir = tempdir().unwrap();
     fs::write(
         dir.path().join("arg-def.json"),
