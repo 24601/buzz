@@ -247,6 +247,10 @@ export class RelayClient {
     return this.fetchHistory(filter);
   }
 
+  /**
+   * Return the first event matching `filter` as soon as it arrives, without
+   * waiting for EOSE. Resolves to `null` when EOSE arrives before any event.
+   */
   async fetchFirstEvent(
     filter: RelaySubscriptionFilter,
   ): Promise<RelayEvent | null> {

@@ -107,6 +107,11 @@ export async function requestFirstEventGated(
   });
 }
 
+/**
+ * Fetch relay history for event IDs in bounded, concurrent chunks and flatten
+ * the responses into one list. Returns an empty list without issuing a request
+ * when `eventIds` is empty.
+ */
 export async function fetchChunkedHistory(
   eventIds: string[],
   buildFilter: (eventIds: string[]) => RelaySubscriptionFilter,
