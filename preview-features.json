@@ -40,6 +40,14 @@
       "platforms": [
         "desktop"
       ]
+    },
+    {
+      "id": "wallet",
+      "name": "Bitcoin Wallet",
+      "description": "Self-custodial Lightning wallet prototype: balance in the top chrome, fund, send, and transaction history",
+      "platforms": [
+        "desktop"
+      ]
     }
   ]
 }
