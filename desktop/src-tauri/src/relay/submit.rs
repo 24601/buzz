@@ -25,6 +25,7 @@ pub async fn submit_event_at_with_keys(
         .sign_with_keys(keys)
         .map_err(|e| format!("failed to sign event: {e}"))?;
     let body_bytes = event.as_json().into_bytes();
+    crate::egress_guard::assert_no_key_backup_bytes(&body_bytes, "relay event submit")?;
     let auth_header = build_nip98_auth_header_for_keys(keys, &Method::POST, &url, &body_bytes)?;
 
     let response = state

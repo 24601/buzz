@@ -188,14 +188,130 @@ pub fn get_nsec(state: State<'_, AppState>) -> Result<String, String> {
         .map_err(|error| format!("encode nsec: {error}"))
 }
 
+/// Generate a 6-word passphrase for a new encrypted backup (EFF short
+/// wordlist, OS entropy, ≈62 bits before the scrypt work factor).
+#[tauri::command]
+pub fn generate_backup_passphrase() -> Result<String, String> {
+    crate::key_backup::generate_passphrase()
+}
+
+/// Core of [`create_ncryptsec_backup`], factored so tests can drive it with a
+/// bare `AppState` + temp dir (and a fast scrypt tier) without an `AppHandle`.
+pub(crate) fn create_and_persist_backup_with_log_n(
+    state: &AppState,
+    data_dir: &std::path::Path,
+    password: &str,
+    log_n: u8,
+) -> Result<String, String> {
+    if password.chars().count() < crate::key_backup::MIN_PASSPHRASE_LEN {
+        return Err(format!(
+            "passphrase must be at least {} characters",
+            crate::key_backup::MIN_PASSPHRASE_LEN
+        ));
+    }
+
+    // Serialize against import_identity/persist_current_identity: the blob
+    // must be derived from — and persisted for — one stable identity. Also
+    // caps KDF concurrency at one.
+    let _mutation_guard = state.identity_mutation.lock().map_err(|e| e.to_string())?;
+
+    // Recovery mode (lost/locked) → Err, same gate as signing.
+    let keys = state.signing_keys()?;
+
+    let ncryptsec = crate::key_backup::create_backup_blob(&keys, password, log_n)?;
+
+    std::fs::create_dir_all(data_dir).map_err(|e| format!("create app data dir: {e}"))?;
+    let path = crate::key_backup::backup_file_path(data_dir);
+    crate::key_backup::write_backup_file(&path, &ncryptsec)?;
+
+    Ok(ncryptsec)
+}
+
+/// Create the canonical app-managed NIP-49 backup.
+///
+/// Encrypts the live identity under `password`, decrypt-verifies the fresh
+/// blob against the live pubkey, atomically persists it to
+/// `{app_data_dir}/identity.ncryptsec` (0o600), rereads and byte-compares,
+/// and returns the exact persisted `ncryptsec1…` string. The entire body runs
+/// under `identity_mutation`, so it serializes against imports and caps KDF
+/// concurrency at one. The webview can never supply canonical blob bytes —
+/// the trust boundary is the password.
+#[tauri::command]
+pub async fn create_ncryptsec_backup(
+    password: String,
+    app_handle: tauri::AppHandle,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let password = zeroize::Zeroizing::new(password);
+        let state = app_handle.state::<AppState>();
+        let data_dir = app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("app data dir: {e}"))?;
+        create_and_persist_backup_with_log_n(
+            &state,
+            &data_dir,
+            &password,
+            crate::key_backup::BACKUP_LOG_N,
+        )
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))?
+}
+
+/// Save a portable copy of an `ncryptsec1…` backup to a user-chosen path.
+///
+/// The input must parse as a structurally valid NIP-49 payload. The dialog is
+/// selection-only; the write uses secret-file semantics (atomic + 0o600).
+/// Never mutates canonical app state. Returns the chosen path, or `None` when
+/// the user cancelled.
+#[tauri::command]
+pub async fn save_ncryptsec_copy(
+    ncryptsec: String,
+    app_handle: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    // Reject anything that is not a valid encrypted-key blob — this command
+    // must not become a generic file writer.
+    crate::key_backup::parse_ncryptsec(&ncryptsec)?;
+    let normalized = ncryptsec.trim().to_string();
+
+    let dest = match crate::commands::export_util::pick_save_path(
+        &app_handle,
+        crate::key_backup::BACKUP_FILE_NAME,
+        "Encrypted key backup",
+        &["ncryptsec"],
+    )
+    .await?
+    {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+
+    let dest_for_write = dest.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::key_backup::write_backup_file(&dest_for_write, &normalized)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking failed: {e}"))??;
+
+    Ok(Some(dest.display().to_string()))
+}
+
 #[tauri::command]
 pub async fn import_identity(
     nsec: String,
+    password: Option<String>,
     app_handle: tauri::AppHandle,
 ) -> Result<IdentityInfo, String> {
     tokio::task::spawn_blocking(move || {
-        let trimmed = nsec.trim();
-        let keys = Keys::parse(trimmed).map_err(|e| format!("Invalid private key: {e}"))?;
+        // `ncryptsec1…` = NIP-49 encrypted backup: requires the passphrase and
+        // decrypts in Rust. Everything after key recovery is byte-for-byte the
+        // raw-nsec path.
+        let password = password.map(zeroize::Zeroizing::new);
+        let keys = crate::key_backup::recover_keys_from_input(
+            &nsec,
+            password.as_ref().map(|p| p.as_str()),
+        )?;
 
         // Serialize against persist_current_identity: hold this guard for the
         // full function body so a concurrent stale persist can't overwrite
@@ -209,6 +325,11 @@ pub async fn import_identity(
             .map_err(|e| format!("app data dir: {e}"))?;
         std::fs::create_dir_all(&data_dir).map_err(|e| format!("create app data dir: {e}"))?;
         let key_path = data_dir.join("identity.key");
+
+        // Importing a different identity invalidates the app-managed backup:
+        // it encrypts the previous key and must not linger mislabeled.
+        let previous_pubkey = state.keys.lock().map_err(|e| e.to_string())?.public_key();
+        crate::key_backup::cleanup_stale_backup(&previous_pubkey, &keys.public_key(), &data_dir)?;
 
         // Persist into the OS keyring first (store → read-back verify → marker →
         // delete file). Falls back to the 0o600 file when the keyring is
@@ -581,5 +702,137 @@ mod nostr_identity_binding_tests {
         .unwrap_err();
 
         assert_eq!(error, "expires_at is expired");
+    }
+}
+
+#[cfg(test)]
+mod key_backup_command_tests {
+    use super::create_and_persist_backup_with_log_n;
+    use crate::app_state::build_app_state;
+    use nostr::Keys;
+
+    /// Fast scrypt tier for tests; production uses BACKUP_LOG_N (18), covered
+    /// once in key_backup_tests::round_trip_at_production_cost.
+    const FAST_LOG_N: u8 = 16;
+    const PASSWORD: &str = "correct horse battery";
+
+    #[test]
+    fn returned_bytes_equal_on_disk_bytes() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let returned =
+            create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).unwrap();
+
+        let path = crate::key_backup::backup_file_path(dir.path());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            returned, on_disk,
+            "webview must receive the exact persisted bytes"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+
+        // And the persisted blob provably recovers the live identity.
+        let keys = state.keys.lock().unwrap().clone();
+        let recovered = crate::key_backup::decrypt_ncryptsec(&on_disk, PASSWORD).unwrap();
+        assert_eq!(recovered.public_key(), keys.public_key());
+    }
+
+    #[test]
+    fn overwrite_replaces_atomically() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let first =
+            create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).unwrap();
+        let second = create_and_persist_backup_with_log_n(
+            &state,
+            dir.path(),
+            "another passphrase",
+            FAST_LOG_N,
+        )
+        .unwrap();
+        assert_ne!(first, second, "fresh salt/nonce per action");
+
+        let path = crate::key_backup::backup_file_path(dir.path());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), second);
+    }
+
+    #[test]
+    fn rejects_short_passphrase() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+        let err = create_and_persist_backup_with_log_n(&state, dir.path(), "short", FAST_LOG_N)
+            .unwrap_err();
+        assert!(err.contains("at least"), "{err}");
+        assert!(!crate::key_backup::backup_file_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn recovery_mode_blocks_backup_creation() {
+        let state = build_app_state();
+        let dir = tempfile::tempdir().unwrap();
+
+        state
+            .identity_lost
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).is_err(),
+            "lost identity must not be backed up"
+        );
+        state
+            .identity_lost
+            .store(false, std::sync::atomic::Ordering::Release);
+
+        state
+            .keyring_locked
+            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(
+            create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).is_err(),
+            "locked keyring must not be backed up"
+        );
+        assert!(!crate::key_backup::backup_file_path(dir.path()).exists());
+    }
+
+    /// Concurrent identity swap vs backup creation: `identity_mutation`
+    /// serializes both, so every persisted blob decrypts to the identity that
+    /// was live for the whole of its create operation — never a torn state.
+    #[test]
+    fn concurrent_identity_swap_vs_backup_is_serialized() {
+        let state = std::sync::Arc::new(build_app_state());
+        let dir = tempfile::tempdir().unwrap();
+        let key_a = state.keys.lock().unwrap().clone();
+        let key_b = Keys::generate();
+
+        let swapper = {
+            let state = state.clone();
+            let key_b = key_b.clone();
+            std::thread::spawn(move || {
+                // Mirrors import_identity's locking: mutation guard held
+                // across the key swap.
+                let _guard = state.identity_mutation.lock().unwrap();
+                *state.keys.lock().unwrap() = key_b;
+            })
+        };
+
+        let backup =
+            create_and_persist_backup_with_log_n(&state, dir.path(), PASSWORD, FAST_LOG_N).unwrap();
+        swapper.join().unwrap();
+
+        let recovered = crate::key_backup::decrypt_ncryptsec(&backup, PASSWORD)
+            .unwrap()
+            .public_key();
+        assert!(
+            recovered == key_a.public_key() || recovered == key_b.public_key(),
+            "backup must match one coherent identity"
+        );
+        // Whichever won, the persisted file equals the returned blob.
+        let on_disk =
+            std::fs::read_to_string(crate::key_backup::backup_file_path(dir.path())).unwrap();
+        assert_eq!(on_disk, backup);
     }
 }
