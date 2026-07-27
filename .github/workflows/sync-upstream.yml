@@ -1,0 +1,85 @@
+# Sync this fork from upstream block/buzz without burning metered CI.
+#
+# Design constraints (intentional):
+#   * Never call the Codemagic API / never trigger Codemagic builds.
+#     codemagic.yaml has no `triggering:` block, so pushes alone never start
+#     Codemagic builds; this workflow also never invokes Codemagic.
+#   * Never workflow_dispatch canaries, release, Harbor, Docker republish, or
+#     any other metered/third-party CI.
+#   * Merge commits always include `[skip ci]` so GitHub Actions push triggers
+#     (CI / Docker / Sprig / helm / Harbor) do not run for the sync push.
+#   * This job itself is a short ubuntu-latest git merge only — no builds,
+#     no tests, no images, no macOS runners.
+#
+# Runs on a daily schedule and on manual workflow_dispatch. Fork-only
+# (`github.repository != 'block/buzz'`). On merge conflicts the job fails
+# loudly so a human can resolve; it does not open PRs that would queue CI.
+
+name: Sync upstream
+
+on:
+  schedule:
+    # 06:17 UTC daily — odd minute to avoid top-of-hour schedule stampedes
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream main
+    if: github.repository != 'block/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          # Persist credentials so we can push the merge commit back to main.
+          persist-credentials: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch and merge upstream
+        env:
+          UPSTREAM_REPO: block/buzz
+          UPSTREAM_BRANCH: main
+          TARGET_BRANCH: main
+        run: |
+          set -euo pipefail
+
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+
+          upstream_sha="$(git rev-parse "upstream/${UPSTREAM_BRANCH}")"
+          upstream_short="$(git rev-parse --short "${upstream_sha}")"
+          echo "Upstream ${UPSTREAM_REPO}@${UPSTREAM_BRANCH} = ${upstream_sha}"
+
+          if git merge-base --is-ancestor "${upstream_sha}" HEAD; then
+            echo "Already up to date with upstream; nothing to do."
+            exit 0
+          fi
+
+          # --no-ff so a fast-forward still produces a commit whose message
+          # carries [skip ci]. Without that, an FF push would re-trigger CI,
+          # Docker, Sprig, etc. on main.
+          if ! git merge --no-ff --no-edit \
+            -m "chore: sync from upstream ${UPSTREAM_REPO}@${upstream_short} [skip ci]" \
+            "${upstream_sha}"; then
+            echo "::error::Merge conflict syncing from ${UPSTREAM_REPO}@${UPSTREAM_BRANCH}. Resolve manually; refusing to open a CI-triggering PR."
+            git merge --abort || true
+            exit 1
+          fi
+
+          git push origin "HEAD:${TARGET_BRANCH}"
+          echo "Synced ${TARGET_BRANCH} to include upstream ${upstream_short} (push used [skip ci])."
