@@ -563,7 +563,7 @@ impl Db {
     pub async fn admin_get_report(
         &self,
         id: Uuid,
-    ) -> Result<Option<admin_moderation::AdminReport>> {
+    ) -> Result<Option<admin_moderation::AdminReportDetail>> {
         admin_moderation::get_report(&self.pool, id).await
     }
 
@@ -1843,24 +1843,6 @@ impl Db {
         user::search_users(&self.pool, community_id, query, limit).await
     }
 
-    /// Return agent pubkeys whose verified owner matches `owner_pubkey`.
-    pub async fn list_agent_pubkeys_by_owner(
-        &self,
-        community_id: CommunityId,
-        owner_pubkey: &[u8],
-    ) -> Result<Vec<Vec<u8>>> {
-        user::list_agent_pubkeys_by_owner(&self.pool, community_id, owner_pubkey).await
-    }
-
-    /// Fetch verified ownership metadata for the requested agent pubkeys.
-    pub async fn get_agent_owners(
-        &self,
-        community_id: CommunityId,
-        agent_pubkeys: &[Vec<u8>],
-    ) -> Result<Vec<user::AgentOwner>> {
-        user::get_agent_owners(&self.pool, community_id, agent_pubkeys).await
-    }
-
     /// Atomically set agent owner — only if no owner is currently assigned.
     /// Returns Ok(true) if set, Ok(false) if an owner already exists.
     pub async fn set_agent_owner(
@@ -2655,6 +2637,23 @@ impl Db {
         enabled: bool,
     ) -> Result<()> {
         workflow::set_workflow_enabled(&self.pool, community_id, id, enabled).await
+    }
+
+    /// Disable all of an owner's workflows in a channel (SEC-006, on
+    /// membership loss). Returns the number of workflows disabled.
+    pub async fn disable_workflows_for_owner_in_channel(
+        &self,
+        community_id: CommunityId,
+        channel_id: Uuid,
+        owner_pubkey: &[u8],
+    ) -> Result<u64> {
+        workflow::disable_workflows_for_owner_in_channel(
+            &self.pool,
+            community_id,
+            channel_id,
+            owner_pubkey,
+        )
+        .await
     }
 
     /// Delete a workflow and all its runs/approvals.
