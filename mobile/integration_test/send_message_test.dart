@@ -58,12 +58,34 @@ Future<bool> _pumpUntil(
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
+  // No relay credentials provided: run the secret-free path so the app still
+  // builds, launches on the simulator, and renders — safe for upstream CI.
+  if (_nsec.isEmpty || _channelId.isEmpty) {
+    testWidgets('boots to the pairing screen (no relay creds provided)', (
+      WidgetTester tester,
+    ) async {
+      SharedPreferences.setMockInitialValues(<String, Object>{});
+      final prefs = await SharedPreferences.getInstance();
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [savedPrefsProvider.overrideWithValue(prefs)],
+          child: const App(),
+        ),
+      );
+      final ok = await _pumpUntil(
+        tester,
+        find.text('Welcome to Buzz'),
+        timeout: const Duration(seconds: 30),
+      );
+      expect(ok, true, reason: 'app did not render the pairing screen');
+      await tester.pump(const Duration(seconds: 3));
+    });
+    return;
+  }
+
   testWidgets('sends a message to a channel through the live relay', (
     WidgetTester tester,
   ) async {
-    expect(_nsec.isNotEmpty, true, reason: 'E2E_NSEC define is required');
-    expect(_channelId.isNotEmpty, true, reason: 'E2E_CHANNEL_ID is required');
-
     // Seed the identity + community the same way successful pairing does.
     const secure = FlutterSecureStorage();
     await secure.deleteAll();
