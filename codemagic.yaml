@@ -1,0 +1,94 @@
+# Codemagic CI — iOS Simulator end-to-end for the Flutter mobile app (mobile/).
+#
+# One workflow, one Xcode build. It boots an iOS Simulator and runs the
+# integration test while screen-recording, publishing the video + screenshot +
+# logs as artifacts:
+#   * With no relay credentials  -> the app builds, launches, and renders its
+#     pairing screen (secret-free; safe for upstream CI to run as-is).
+#   * With relay credentials      -> the app authenticates against a live relay,
+#     opens a channel, and sends a real kind:9 message (see the E2E_* vars).
+#
+# Trigger via the Codemagic REST API with workflowId "ios-e2e". There is no
+# `triggering:` block on purpose — builds never start automatically on push, so
+# this never consumes minutes unless explicitly requested.
+#
+# Optional relay E2E variables (set on the build trigger):
+#   E2E_RELAY_URL, E2E_NSEC, E2E_PUBKEY, E2E_CHANNEL_ID, E2E_CHANNEL_NAME,
+#   E2E_CONTENT
+#
+# Artifacts are written to `$CM_BUILD_DIR/artifacts` (clone root); the globs
+# resolve relative to the clone root regardless of each script's cwd.
+workflows:
+  ios-e2e:
+    name: iOS Simulator E2E (video)
+    instance_type: mac_mini_m2
+    max_build_duration: 60
+    environment:
+      flutter: 3.41.7
+      xcode: latest
+      cocoapods: default
+      vars:
+        COCOAPODS_DISABLE_STATS: "true"
+    # Persisted across builds to save minutes: pub packages, CocoaPods spec repo
+    # + installed Pods, Dart tool state, and Xcode DerivedData (incremental
+    # compile). Populated after the first successful build.
+    cache:
+      cache_paths:
+        - $HOME/.pub-cache
+        - $HOME/Library/Caches/CocoaPods
+        - $HOME/.cocoapods
+        - $CM_BUILD_DIR/mobile/.dart_tool
+        - $CM_BUILD_DIR/mobile/ios/Pods
+        - $HOME/Library/Developer/Xcode/DerivedData
+    scripts:
+      - name: Toolchain versions
+        script: |
+          flutter --version
+          xcodebuild -version
+      - name: Flutter pub get
+        script: cd "$CM_BUILD_DIR/mobile" && flutter pub get
+      - name: Boot simulator, record, run iOS integration test
+        script: |
+          # NOTE: no `pipefail` — `... | head` triggers SIGPIPE upstream and
+          # would abort under pipefail. Be defensive with `|| true` instead.
+          set -u
+          cd "$CM_BUILD_DIR/mobile"
+          ART="$CM_BUILD_DIR/artifacts"; mkdir -p "$ART"
+
+          DEVICE=$(xcrun simctl list devices available \
+            | grep -iE 'iPhone' \
+            | grep -oiE '[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}' \
+            | head -n1)
+          echo "DEVICE=[$DEVICE]"
+          if [ -z "$DEVICE" ]; then echo "No iPhone simulator available"; exit 1; fi
+          xcrun simctl boot "$DEVICE" 2>/dev/null || true
+          xcrun simctl bootstatus "$DEVICE" || true
+
+          # Record the whole test run (build + launch + drive).
+          xcrun simctl io "$DEVICE" recordVideo --codec=h264 "$ART/ios_e2e.mp4" &
+          REC_PID=$!
+          sleep 2
+
+          set +e
+          flutter test integration_test/send_message_test.dart -d "$DEVICE" \
+            --dart-define=E2E_RELAY_URL="${E2E_RELAY_URL:-}" \
+            --dart-define=E2E_NSEC="${E2E_NSEC:-}" \
+            --dart-define=E2E_PUBKEY="${E2E_PUBKEY:-}" \
+            --dart-define=E2E_CHANNEL_ID="${E2E_CHANNEL_ID:-}" \
+            --dart-define=E2E_CHANNEL_NAME="${E2E_CHANNEL_NAME:-mobile-e2e}" \
+            --dart-define=E2E_CONTENT="${E2E_CONTENT:-Hello from the iOS Simulator}" \
+            2>&1 | tee "$ART/integration-test.log"
+          TEST_RC=${PIPESTATUS[0]}
+          set -e
+
+          xcrun simctl io "$DEVICE" screenshot "$ART/ios_e2e_final.png" || true
+          sleep 2
+          kill -INT "$REC_PID" 2>/dev/null || true
+          wait "$REC_PID" 2>/dev/null || true
+          echo "== artifacts =="; ls -la "$ART" || true
+          echo "integration test rc=$TEST_RC"
+          exit "$TEST_RC"
+    artifacts:
+      - artifacts/*.mp4
+      - artifacts/*.png
+      - artifacts/*.log
