@@ -573,3 +573,160 @@ just mobile-dev
 - [ARCHITECTURE.md](ARCHITECTURE.md) — system design and component relationships
 - [RELEASING.md](RELEASING.md) — release process: `release-desktop`, `release-relay`, `scripts/mobile-release.sh`, candidate tags, internal builds
 - [README.md](README.md) — project overview and quick start
+
+---
+
+## Cursor Cloud specific instructions
+
+Notes for cloud agents. The VM snapshot already has the toolchain (via Hermit)
+and these system packages installed: Docker, native PostgreSQL 16, Redis 7,
+the MinIO server + `mc` client, `libssl-dev`/`pkg-config` (needed for
+`openssl-sys` when running the full `just clippy`), `jq`, and the Playwright
+Chromium browser. The startup update script only refreshes JS deps
+(`./bin/pnpm install`); everything below (starting services, migrations) is
+**not** automated — start it yourself each session.
+
+### Docker limitation — DO NOT use `docker compose` for backing services
+
+This VM's cgroup root is a permanent `domain threaded` root, so containers that
+need domain controllers (`memory`/`io`) cannot start — `docker compose up`
+fails with `cannot enter cgroupv2 "/sys/fs/cgroup/docker" ... threaded mode`.
+`docker run hello-world` works, but Postgres/Redis/MinIO/Keycloak/etc. do not.
+
+Consequence: `just setup`, `just relay`, `just test`, and anything depending on
+`_ensure-services` will hang ~2min then fail at the Docker step. **Run the
+underlying services natively and invoke `cargo`/`buzz` directly instead.**
+
+### Start backing services natively (run once per VM boot)
+
+There is no systemd, so start each process manually:
+
+```bash
+sudo redis-server --daemonize yes --dir /var/lib/redis
+sudo pg_ctlcluster 16 main start                     # Postgres 16 on :5432
+MINIO_ROOT_USER=buzz_dev MINIO_ROOT_PASSWORD=buzz_dev_secret \
+  minio server /var/lib/minio-data --console-address ":9001" &   # S3 on :9000
+```
+
+The `buzz` Postgres role/db (`postgres://buzz:buzz_dev@localhost:5432/buzz`)
+and the `buzz-media` MinIO bucket already exist in the snapshot; recreate them
+only if missing (role: `CREATE ROLE buzz LOGIN PASSWORD 'buzz_dev' SUPERUSER;`
++ `createdb -O buzz buzz`; bucket: `mc alias set local http://localhost:9000
+buzz_dev buzz_dev_secret && mc mb --ignore-existing local/buzz-media`).
+
+MinIO on `:9000` is **required for relay startup** — the relay runs a git
+object-store conformance probe (A3 gate) at boot and exits if S3 is
+unreachable. (`BUZZ_GIT_CONFORMANCE_PROBE=false` skips the probe but media/git
+still need S3 at runtime.)
+
+### Run the relay + migrations directly
+
+The binaries read config from the environment (no dotenv autoload), so source
+`.env` first. Hermit's `bin/` symlinks work without activation.
+
+```bash
+set -a && . ./.env && set +a
+cargo run -p buzz-admin -- migrate      # idempotent; skips applied migrations
+./scripts/seed-local-community.sh       # seeds localhost:3000 community (idempotent)
+cargo run -p buzz-relay                 # ws/http on :3000; /health returns "ok"
+```
+
+### CLI smoke test (dev auth)
+
+`.env` has `BUZZ_REQUIRE_AUTH_TOKEN=false`, so any Nostr key works and relay
+membership is not required. `buzz-admin` in this version has no `mint-token`
+(TESTING.md is stale) — use `buzz-admin generate-key` for a keypair.
+
+```bash
+cargo build -p buzz-cli                 # -> ./target/debug/buzz
+export BUZZ_RELAY_URL=http://localhost:3000
+export BUZZ_PRIVATE_KEY=<64-hex secret from `buzz-admin generate-key`>
+CH=$(./target/debug/buzz channels create --name demo --type stream \
+       --visibility open | jq -r .channel_id)
+./target/debug/buzz messages send --channel "$CH" --content "hello"
+./target/debug/buzz messages get --channel "$CH" | jq .
+```
+
+### Lint / test / desktop
+
+- Lint gate works normally: `just fmt-check` and `just clippy` both pass
+  (clippy needs `libssl-dev`, already installed).
+- `just test-unit` passes except one pre-existing, clock-dependent flake,
+  `buzz-db replica_fence::tests::fence_starts_closed_and_opens_on_advance`
+  (asserts a microsecond-truncated timestamp equals a nanosecond clock value;
+  fails on any host whose clock has sub-µs nanoseconds — unrelated to setup).
+- `just test` (integration/E2E) needs the native services above running, not
+  Docker.
+- Desktop renders headlessly via the mock bridge: `just desktop-typecheck`,
+  `just desktop-build`, and `just desktop-screenshot --name home` all work
+  (Chromium is pre-installed).
+
+### Native Tauri shell (headless, real WebKitGTK window)
+
+The full native desktop app **does** run here — there is a VNC-backed X server
+at `DISPLAY=:1` (1920x1200, XFCE + `xfwm4`) that RecordScreen/computerUse also
+use. Snapshot already has the Linux GUI build deps (`libwebkit2gtk-4.1-dev`,
+`libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`,
+`libsoup-3.0-dev`, `libasound2-dev`/`libpulse-dev` for huddle audio) plus
+`Xvfb`/`ffmpeg`/ImageMagick.
+
+`just dev` is unusable (it re-runs the Docker `_ensure-services` gate and
+refuses to start when a relay is already on :3000). Use `just desktop-standalone`
+instead — it builds the sidecars + `src-tauri` and runs `tauri dev` with no
+relay/Docker, and the app auto-fills `ws://localhost:3000` during onboarding so
+it connects to the locally-running relay:
+
+```bash
+export DISPLAY=:1 \
+  WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 \
+  LIBGL_ALWAYS_SOFTWARE=1        # WebKitGTK needs software GL under VNC
+just desktop-standalone
+```
+
+First launch downloads STT/TTS models (Parakeet/Pocket-TTS) into `~/.buzz` —
+allow a minute. Complete onboarding via computerUse (Create identity → skip
+agent-harness step → Join community `ws://localhost:3000` → set a display
+name), then use channels normally. Capture receipts with RecordScreen (video)
+or `DISPLAY=:1 import -window root out.png` (screenshot).
+
+**`libstdc++.so` linker note:** Rust 1.95 links with bundled `rust-lld`, which
+needs the `libstdc++.so` dev symlink in a standard multiarch path. The snapshot
+has `/usr/lib/x86_64-linux-gnu/libstdc++.so -> libstdc++.so.6`; if a
+`cannot find -lstdc++` link error ever recurs on a fresh VM, recreate it with
+`sudo ln -sf /usr/lib/x86_64-linux-gnu/libstdc++.so.6 /usr/lib/x86_64-linux-gnu/libstdc++.so`.
+
+### Mobile (Flutter) — what runs here
+
+Agent-safe checks work fully headless: `just mobile-check` / `flutter analyze`
+(clean) and `flutter test` (~666 tests pass). Per this file's rules, agents do
+**not** run `flutter run`/`flutter build` for routine work — use those checks.
+
+**Device UI, though, is not fully blocked.** iOS is macOS-only (impossible here)
+and an Android emulator needs `/dev/kvm` (absent — `ls /dev/kvm` fails), but the
+Flutter **Linux desktop** target *does* build and run against `DISPLAY=:1`, and
+`flutter devices` already lists "Linux (desktop)". The snapshot has the needed
+toolchain (`clang`, `lld`, `llvm-18`, `libstdc++-13-dev`, `ninja-build`, `cmake`,
+`gnome-keyring`, `dbus-x11`). To reproduce a real running app for
+screenshots/video (the `mobile/linux` scaffold is intentionally NOT committed —
+Linux is not a product target, so regenerate it throwaway and delete it after):
+
+```bash
+cd mobile
+flutter create --platforms=linux .            # throwaway scaffold; do NOT commit
+# native-asset C++ build (mobile_scanner) needs the libstdc++ headers on clang:
+export CPLUS_INCLUDE_PATH=/usr/include/c++/13:/usr/include/x86_64-linux-gnu/c++/13
+flutter build linux --debug
+# run with an unlocked keyring so flutter_secure_storage can init identity:
+DISPLAY=:1 LIBGL_ALWAYS_SOFTWARE=1 dbus-run-session -- bash -c \
+  'eval "$(printf "x\n" | gnome-keyring-daemon --unlock --components=secrets,ssh)"; \
+   export GNOME_KEYRING_CONTROL SSH_AUTH_SOCK; \
+   ./build/linux/x64/debug/bundle/buzz'
+git checkout -- .metadata && rm -rf linux       # revert the scaffold when done
+```
+
+The app renders its real pairing screen ("Welcome to Buzz — Scan the QR code …
+or paste a pairing code"). Caveats on Linux desktop: mobile-only plugins have no
+Linux implementation — `mobile_scanner`/`camera` (so QR *scanning* is dead; use
+the paste-pairing-code path), `video_player`, `image_picker`, and
+`app_badge_plus` (logs a harmless `MissingPluginException`). Without an unlocked
+keyring the app hangs on a spinner at `libsecret KeyringLocked`.
